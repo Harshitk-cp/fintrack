@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.smscollector'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.smscollector"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // Queues uploads across app restarts and offline periods, with backoff.
+  implementation "androidx.work:work-runtime-ktx:2.10.1"
+}

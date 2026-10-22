@@ -1,0 +1,47 @@
+# Production stack for the VPS: Caddy (HTTPS) -> app -> Postgres.
+# Usage: cp .env.example .env && edit, then `docker compose up -d --build`.
+services:
+  db:
+    image: postgres:18.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fintrack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: fintrack
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintrack -d fintrack"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql
+    # No published ports: only reachable from the app container.
+
+  app:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fintrack:${POSTGRES_PASSWORD}@db:5432/fintrack
+      FINTRACK_DATA_KEY: ${FINTRACK_DATA_KEY:?set FINTRACK_DATA_KEY}
+      FINTRACK_TIME_ZONE: Asia/Kolkata
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FINTRACK_PUSH_URL: ${FINTRACK_PUSH_URL:-https://ntfy.sh}
+      FINTRACK_PUSH_TOKEN: ${FINTRACK_PUSH_TOKEN:-}
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      FINTRACK_DOMAIN: ${FINTRACK_DOMAIN:?set FINTRACK_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+volumes:
+  pgdata:
+  caddy_data:

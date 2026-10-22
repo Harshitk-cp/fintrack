@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Install: cp to ~/Library/LaunchAgents/ and launchctl bootstrap gui/$(id -u) <that path> -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fintrack.ios-autoinstall</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/kage/_development/fintrack/mobile/scripts/ios-autoinstall.sh</string></array>
+  <key>StartInterval</key><integer>1200</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/kage/Library/Logs/fintrack-ios.log</string>
+  <key>StandardErrorPath</key><string>/Users/kage/Library/Logs/fintrack-ios.log</string>
+</dict>
+</plist>

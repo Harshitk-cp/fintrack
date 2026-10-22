@@ -1,0 +1,59 @@
+# Stack for a VPS that already runs a Caddy on another compose project's
+# network (here: engram). The proxy routes the domain to `fintrack-app:8080`;
+# nothing here publishes a port. Sized for two users on a small shared box.
+# Usage: cp .env.example .env && edit, then
+#   docker compose -f compose.shared.yml up -d --build
+name: fintrack
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "5m", max-file: "2" }
+
+services:
+  db:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    command: >
+      postgres -c shared_buffers=32MB -c work_mem=2MB -c maintenance_work_mem=16MB
+      -c max_connections=20 -c effective_cache_size=128MB
+    environment:
+      POSTGRES_USER: fintrack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: fintrack
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintrack -d fintrack"]
+      interval: 10s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql
+    mem_limit: 192m
+    logging: *logging
+
+  app:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fintrack:${POSTGRES_PASSWORD}@db:5432/fintrack
+      FINTRACK_DATA_KEY: ${FINTRACK_DATA_KEY:?set FINTRACK_DATA_KEY}
+      FINTRACK_TIME_ZONE: Asia/Kolkata
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FINTRACK_PUSH_URL: ${FINTRACK_PUSH_URL:-https://ntfy.sh}
+      FINTRACK_PUSH_TOKEN: ${FINTRACK_PUSH_TOKEN:-}
+      NODE_OPTIONS: --max-old-space-size=128
+    networks:
+      default: {}
+      proxy:
+        aliases: [fintrack-app]
+    mem_limit: 256m
+    logging: *logging
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-engram_engram}
+
+volumes:
+  pgdata:

@@ -1,0 +1,17 @@
+node_modules/
+.env
+deploy/.env
+mobile/node_modules/
+mobile/ios/
+mobile/android/
+mobile/.expo/
+.claude
+# Local tooling and logs
+.claude/settings.local.json
+*.log
+.DS_Store
+
+# Native module build output
+mobile/modules/*/android/build/
+mobile/modules/*/android/.gradle/
+mobile/modules/*/ios/build/
