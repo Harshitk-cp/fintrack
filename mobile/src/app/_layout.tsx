@@ -11,6 +11,8 @@ import { CyberBackground } from "@/components/cyber";
 import { Splash } from "@/components/splash";
 import { BadgesProvider } from "@/lib/badges";
 import { LockGate } from "@/lib/lock";
+import { PrivacyProvider } from "@/lib/privacy";
+import { ToastProvider } from "@/lib/toast";
 import { usePush } from "@/lib/push";
 import { SessionProvider, useSession } from "@/lib/session";
 import { useStackOptions, useTheme } from "@/lib/theme";
@@ -38,6 +40,10 @@ function RootStack() {
         <Stack.Screen name="transactions" options={{ title: "All transactions" }} />
         <Stack.Screen name="insights" options={{ title: "Insights" }} />
         <Stack.Screen name="sip" options={{ title: "SIP", presentation: "modal", contentStyle: { backgroundColor: theme.bg } }} />
+        <Stack.Screen name="search" options={{ headerShown: false, animation: "fade" }} />
+        <Stack.Screen name="subscriptions" options={{ title: "Subscriptions" }} />
+        <Stack.Screen name="budgets" options={{ title: "Category budgets" }} />
+        <Stack.Screen name="refund" options={{ title: "Refund", presentation: "modal", contentStyle: { backgroundColor: theme.bg } }} />
       </Stack.Protected>
       <Stack.Protected guard={!session}>
         <Stack.Screen name="sign-in" options={{ title: "Sign in", headerShown: false }} />
@@ -76,11 +82,15 @@ export default function Layout() {
       {splash !== "show" && (
         <ThemeProvider value={navTheme}>
           <SessionProvider>
-            <BadgesProvider>
-              <LockGate>
-                <RootStack />
-              </LockGate>
-            </BadgesProvider>
+            <PrivacyProvider>
+              <BadgesProvider>
+                <ToastProvider>
+                  <LockGate>
+                    <RootStack />
+                  </LockGate>
+                </ToastProvider>
+              </BadgesProvider>
+            </PrivacyProvider>
           </SessionProvider>
         </ThemeProvider>
       )}

@@ -7,6 +7,7 @@ import { Empty, IconTile } from "@/components/ui";
 import { getNotifications, markNotificationsRead, type AppNotification } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
 import { formatDateTime } from "@/lib/format";
+import { useMaskText } from "@/lib/privacy";
 import { useSession } from "@/lib/session";
 import { useTheme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
@@ -17,6 +18,7 @@ export default function InboxScreen() {
   const t = useTheme();
   const { session } = useSession();
   const badges = useBadges();
+  const mask = useMaskText();
   const [items, setItems] = useState<AppNotification[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -59,8 +61,8 @@ export default function InboxScreen() {
         >
           <IconTile name={ICON[item.kind]} hot={!item.read_at && (item.kind === "review" || item.kind === "budget")} />
           <View style={{ flex: 1 }}>
-            <Text style={{ color: t.text, fontSize: 15, fontWeight: item.read_at ? "500" : "700" }}>{item.title}</Text>
-            <Text style={{ color: t.muted, fontSize: 14, lineHeight: 19, marginTop: 2 }}>{item.body}</Text>
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: item.read_at ? "500" : "700" }}>{mask(item.title)}</Text>
+            <Text style={{ color: t.muted, fontSize: 14, lineHeight: 19, marginTop: 2 }}>{mask(item.body)}</Text>
             <Text style={{ color: t.muted, fontSize: 12, marginTop: 4 }}>{formatDateTime(item.created_at)}</Text>
           </View>
         </Pressable>

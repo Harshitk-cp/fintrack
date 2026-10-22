@@ -1,13 +1,21 @@
-import { router, Stack, useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { router, Stack, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { CyberButton } from "@/components/cyber";
+import { PixelIcon } from "@/components/pixel-icon";
 import { Text, TextInput } from "@/components/text";
 import { Button, CategoryPicker, Chip, HeaderButton, inputStyle, Row, Section } from "@/components/ui";
-import { ApiError, deleteTransaction, formatInr, getTransaction, parseRupees, updateTransaction, type TransactionDetail, type TransactionPatch } from "@/lib/api";
+import {
+  addRefund, addTransaction, ApiError, deleteRefund, deleteTransaction, getTransaction, parseRupees, updateTransaction, type TransactionDetail, type TransactionPatch,
+} from "@/lib/api";
 import { useBadges } from "@/lib/badges";
 import { formatDateTime, payeeName, REVIEW_PROMPT } from "@/lib/format";
+import { useOnLedgerChange } from "@/lib/events";
+import { haptic } from "@/lib/haptics";
+import { useMoney } from "@/lib/privacy";
 import { useSession } from "@/lib/session";
 import { useTheme } from "@/lib/theme";
+import { useToast } from "@/lib/toast";
 
 // How a transaction counts toward totals. Maps onto event_type + excluded.
 type Counting = "spend" | "income" | "refund" | "transfer" | "excluded";
@@ -34,6 +42,8 @@ export default function TransactionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { session } = useSession();
   const badges = useBadges();
+  const money = useMoney();
+  const toast = useToast();
   const [txn, setTxn] = useState<TransactionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -62,6 +72,17 @@ export default function TransactionScreen() {
   }, [session, id]);
   // eslint-disable-next-line react-hooks/set-state-in-effect -- fetches on mount; state is only set once the request resolves
   useEffect(() => void load(), [load]);
+  useOnLedgerChange(() => {
+    if (session && id) getTransaction(session, id).then((r) => setTxn(r.transaction), () => {});
+  });
+  // Coming back from the refund screen: show the new refund (without resetting edits on first focus).
+  const focused = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (focused.current && session && id) getTransaction(session, id).then((r) => setTxn(r.transaction), () => {});
+      focused.current = true;
+    }, [session, id]),
+  );
 
   const manual = txn?.source === "manual";
   const hasPayee = !!(txn?.counterparty || txn?.counterparty_vpa);
@@ -83,31 +104,69 @@ export default function TransactionScreen() {
     setSaving(true);
     try {
       const r = await updateTransaction(session, txn.id, patch);
+      haptic.success();
       badges.refresh();
       if (r.applied_to) {
-        Alert.alert("Saved", `Also applied to ${r.applied_to} other payment${r.applied_to === 1 ? "" : "s"} to this payee.`);
+        // Copied to other payments too, so undoing only this one would be misleading.
+        toast({ message: `Saved. Also applied to ${r.applied_to} other payment${r.applied_to === 1 ? "" : "s"} to this payee.` });
+      } else {
+        const before: TransactionPatch = {
+          label: txn.label, category: txn.category, note: txn.note, event_type: txn.event_type, excluded: txn.excluded,
+          ...(manual ? { amount_minor: txn.amount_minor } : {}),
+          ...(txn.reviewed_at ? {} : { reviewed: false }),
+          ...(patch.remember ? { forget: true } : {}),
+        };
+        toast({
+          message: "Saved",
+          undo: async () => {
+            await updateTransaction(session, txn.id, before).catch(() => toast({ message: "Couldn't undo. Check your connection." }));
+            badges.refresh();
+          },
+        });
       }
       router.back();
     } catch {
+      haptic.error();
       setError("Couldn't save. Check your connection.");
     } finally {
       setSaving(false);
     }
   }
 
-  function remove() {
+  // Deleting is immediate; Undo adds the entry back.
+  async function remove() {
     if (!session || !txn) return;
-    Alert.alert("Delete this entry?", "This can't be undone.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          await deleteTransaction(session, txn.id).catch(() => {});
-          router.back();
-        },
-      },
-    ]);
+    try {
+      await deleteTransaction(session, txn.id);
+    } catch {
+      haptic.error();
+      return setError("Couldn't delete. Check your connection.");
+    }
+    haptic.warning();
+    toast({
+      message: `${payeeName(txn)} deleted`,
+      undo: () =>
+        addTransaction(session, {
+          amount_minor: txn.amount_minor, direction: txn.direction, counterparty: txn.label ?? txn.counterparty ?? "Cash", category: txn.category,
+          occurred_at: txn.occurred_at, paid_with: txn.institution_name, note: txn.note,
+        }).catch(() => toast({ message: "Couldn't restore it. Check your connection." })),
+    });
+    router.back();
+  }
+
+  async function removeRefund(r: TransactionDetail["refunds"][number]) {
+    if (!session || !txn) return;
+    const reload = async () => setTxn((await getTransaction(session, txn.id)).transaction);
+    try {
+      await deleteRefund(session, r.id);
+      await reload();
+      toast({
+        message: `${money(r.amount_minor)} refund removed`,
+        undo: () => addRefund(session, txn.id, { amount_minor: r.amount_minor, refund_transaction_id: r.refund_txn_id }).then(reload, () => toast({ message: "Couldn't restore it." })),
+      });
+    } catch {
+      toast({ message: "Couldn't remove the refund. Check your connection." });
+    }
   }
 
   if (!txn) {
@@ -127,8 +186,13 @@ export default function TransactionScreen() {
         <View style={styles.hero}>
           <Text style={[styles.amount, { color: credit ? t.credit : t.text }]}>
             {credit ? "+" : ""}
-            {formatInr(txn.amount_minor)}
+            {money(txn.amount_minor)}
           </Text>
+          {!!txn.refunded_minor && (
+            <Text style={{ color: t.muted, fontSize: 14, marginTop: 4 }}>
+              {`${money(txn.refunded_minor)} refunded · cost you ${money(txn.amount_minor - txn.refunded_minor)}`}
+            </Text>
+          )}
           <Text style={[styles.payee, { color: t.text }]} selectable>
             {payeeName(txn)}
           </Text>
@@ -163,6 +227,42 @@ export default function TransactionScreen() {
           </View>
         </Section>
 
+        <Section
+          title="Refund"
+          footer={
+            credit
+              ? "Link a refund to the purchase it paid back: that purchase then costs less, and this money isn't counted as income."
+              : "Got money back for this? Mark the exact amount. Your spending drops by that much."
+          }
+        >
+          {txn.refunds.map((r) =>
+            credit ? (
+              <Row key={r.id} label="Refund for" value={`${r.purchase_name ?? "Purchase"} · ${money(r.amount_minor)}`} />
+            ) : (
+              <View key={r.id} style={styles.refund}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: t.text, fontSize: 15, fontWeight: "600" }}>{`${money(r.amount_minor)} back`}</Text>
+                  <Text style={{ color: t.muted, fontSize: 13 }} numberOfLines={1}>
+                    {r.refund_txn_id ? `${r.credit_name ?? "Credit"} · ${r.credit_at ? formatDateTime(r.credit_at) : ""}` : `Marked ${formatDateTime(r.created_at)}`}
+                  </Text>
+                </View>
+                <Text style={{ color: t.dangerText, fontSize: 14, fontWeight: "600", textDecorationLine: "underline" }} onPress={() => removeRefund(r)}>
+                  Remove
+                </Text>
+              </View>
+            ),
+          )}
+          {credit && txn.refunds[0] ? (
+            <Chip label="Open the purchase" icon="external-link" onPress={() => router.push(`/transaction/${txn.refunds[0]!.purchase_id}`)} />
+          ) : credit ? (
+            <CyberButton title="This is a refund for…" icon={<PixelIcon name="undo" size={18} color={t.text} />} onPress={() => router.push({ pathname: "/refund", params: { credit: txn.id } })} />
+          ) : (txn.refunded_minor ?? 0) < txn.amount_minor ? (
+            <CyberButton title={txn.refunds.length ? "Add another refund" : "Mark a refund"} icon={<PixelIcon name="undo" size={18} color={t.text} />} onPress={() => router.push({ pathname: "/refund", params: { purchase: txn.id } })} />
+          ) : (
+            <Text style={{ color: t.muted, fontSize: 14 }}>Fully refunded.</Text>
+          )}
+        </Section>
+
         {manual && (
           <Section title="Amount (₹)">
             <TextInput style={inputStyle(t)} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
@@ -184,7 +284,7 @@ export default function TransactionScreen() {
           <Section footer="Future payments to this payee get the same name, category and type automatically.">
             <View style={styles.switchRow}>
               <Text style={{ color: t.text, fontSize: 15, flex: 1 }}>Remember for this payee</Text>
-              <Switch value={remember} onValueChange={setRemember} trackColor={{ true: t.accent }} />
+              <Switch value={remember} onValueChange={(v) => { haptic.select(); setRemember(v); }} trackColor={{ true: t.accent }} />
             </View>
           </Section>
         )}
@@ -218,6 +318,7 @@ const styles = StyleSheet.create({
   payee: { fontSize: 18, fontWeight: "500", marginTop: 6, textAlign: "center" },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   switchRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  refund: { flexDirection: "row", alignItems: "center", gap: 12 },
 });
 
 /** "SMS", "Email", "SMS + email" or "2 SMS + email": which messages back this transaction. */

@@ -2,6 +2,7 @@ import * as SecureStore from "expo-secure-store";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import SmsCollector from "../../modules/sms-collector";
 import type { Session } from "./api";
+import { clearCache } from "./offline";
 
 const KEY = "fintrack.session";
 
@@ -31,12 +32,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = useCallback(async (s: Session) => {
+    clearCache(); // never show one account's saved data to another
     await SecureStore.setItemAsync(KEY, JSON.stringify(s));
     SmsCollector?.configure(s.serverUrl, s.token);
     setSession(s);
   }, []);
 
   const signOut = useCallback(async () => {
+    clearCache();
     await SecureStore.deleteItemAsync(KEY);
     SmsCollector?.disable();
     setSession(null);

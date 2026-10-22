@@ -5,9 +5,12 @@ import { CyberButton, Meter, MiniBars, PixelLabel, PressScale, Reveal } from "@/
 import { PixelIcon } from "@/components/pixel-icon";
 import { Text } from "@/components/text";
 import { Card, Chip } from "@/components/ui";
-import { formatInr, getSips, getSummary, getTransactions, setSipPaid, type SipState, type Summary, type Transaction } from "@/lib/api";
+import {
+  getBudgets, getSips, getSubscriptions, getSummary, getTransactions, setSipPaid, type Budgets, type SipState, type Subscriptions, type Summary, type Transaction,
+} from "@/lib/api";
 import { category, categoryLabel } from "@/lib/categories";
 import { TZ } from "@/lib/format";
+import { useMoney } from "@/lib/privacy";
 import { useSession } from "@/lib/session";
 import { alpha, FONT, PALETTE, RADIUS, useTheme, type Theme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
@@ -15,18 +18,26 @@ import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
 /** The month in detail: what came in, where it went (needs, wants, savings, categories) and SIPs. */
 export default function InsightsScreen() {
   const t = useTheme();
+  const formatInr = useMoney();
   const { session } = useSession();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [sips, setSips] = useState<SipState | null>(null);
   const [txns, setTxns] = useState<Transaction[]>([]);
+  const [budgets, setBudgets] = useState<Budgets | null>(null);
+  const [subs, setSubs] = useState<Subscriptions | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     if (!session) return;
-    const [s, p, l] = await Promise.all([getSummary(session).catch(() => null), getSips(session).catch(() => null), getTransactions(session, { limit: 200 }).catch(() => null)]);
+    const [s, p, l, b, u] = await Promise.all([
+      getSummary(session).catch(() => null), getSips(session).catch(() => null), getTransactions(session, { limit: 200 }).catch(() => null),
+      getBudgets(session).catch(() => null), getSubscriptions(session).catch(() => null),
+    ]);
     if (s) setSummary(s);
     if (p) setSips(p);
     if (l) setTxns(l.transactions);
+    if (b) setBudgets(b);
+    if (u) setSubs(u);
   }, [session]);
   useRefreshOnActive(useCallback(() => void load(), [load]));
 
@@ -86,31 +97,68 @@ export default function InsightsScreen() {
         <SipCard state={sips} onChange={setSips} t={t} />
       </Reveal>
 
-      {summary.by_category.length > 0 && (
+      {subs && subs.subscriptions.some((s) => s.active) && (
         <Reveal index={3}>
-          <Card style={{ gap: 14 }}>
-            <PixelLabel style={{ marginBottom: 0 }}>By category</PixelLabel>
-            {summary.by_category.map((c, i) => {
-              const cat = category(c.category);
-              const max = Math.max(1, ...summary.by_category.map((x) => x.spent_minor));
-              return (
-                <View key={c.category ?? "none"} style={{ gap: 6 }}>
-                  <View style={styles.row}>
-                    <View style={styles.rowName}>
-                      <PixelIcon name={cat?.icon ?? "warning-diamond"} size={16} color={t.text} />
-                      <Text style={{ color: t.text, fontSize: 14 }}>{categoryLabel(c.category)}</Text>
-                    </View>
-                    <Text style={[styles.amount, { color: t.text }]}>{formatInr(c.spent_minor)}</Text>
-                  </View>
-                  <Meter value={c.spent_minor / max} height={6} delay={150 + i * 60} color={i === 0 || !cat ? t.accent : t.text} />
-                </View>
-              );
-            })}
-          </Card>
+          <PressScale onPress={() => router.push("/subscriptions")} accessibilityLabel="Open subscriptions">
+            <Card style={styles.subs}>
+              <View style={{ flex: 1, gap: 4 }}>
+                <Text style={[styles.tag, { color: t.muted }]}>SUBSCRIPTIONS</Text>
+                <Text style={[styles.smallValue, { color: t.text }]} adjustsFontSizeToFit numberOfLines={1}>
+                  {formatInr(subs.monthly_total_minor)}
+                  <Text style={{ fontSize: 13, color: t.muted }}> /mo</Text>
+                </Text>
+                <Text style={{ color: t.muted, fontSize: 13 }}>
+                  {(() => {
+                    const n = subs.subscriptions.filter((s) => s.active).length;
+                    const up = subs.subscriptions.filter((s) => s.active && s.previous_minor !== null && s.amount_minor > s.previous_minor).length;
+                    return `${n} active${up ? ` · ${up} went up` : ""}`;
+                  })()}
+                </Text>
+              </View>
+              <PixelIcon name="chevron-right" size={20} color={t.muted} />
+            </Card>
+          </PressScale>
         </Reveal>
       )}
 
-      <Reveal index={4} style={styles.pair}>
+      <Reveal index={4}>
+        <Card style={{ gap: 14 }}>
+          <PixelLabel right={budgets?.budgets.length ? "spent / budget" : undefined} style={{ marginBottom: 0 }}>By category</PixelLabel>
+          {summary.by_category.length === 0 && <Text style={{ color: t.muted, fontSize: 14 }}>No spending yet this month.</Text>}
+          {summary.by_category.map((c, i) => {
+            const cat = category(c.category);
+            const max = Math.max(1, ...summary.by_category.map((x) => x.spent_minor));
+            const limit = budgets?.budgets.find((b) => b.category === c.category)?.amount_minor;
+            const share = limit ? c.spent_minor / limit : null;
+            return (
+              <View key={c.category ?? "none"} style={{ gap: 6 }}>
+                <View style={styles.row}>
+                  <View style={styles.rowName}>
+                    <PixelIcon name={cat?.icon ?? "warning-diamond"} size={16} color={t.text} />
+                    <Text style={{ color: t.text, fontSize: 14 }}>{categoryLabel(c.category)}</Text>
+                  </View>
+                  <Text style={[styles.amount, { color: t.text }]}>
+                    {formatInr(c.spent_minor)}
+                    {limit ? <Text style={{ color: t.muted, fontWeight: "400" }}>{` / ${formatInr(limit)}`}</Text> : null}
+                  </Text>
+                </View>
+                {/* With a budget the bar fills towards the limit; without one it compares categories. */}
+                <Meter
+                  value={share ?? c.spent_minor / max}
+                  height={6}
+                  delay={150 + i * 60}
+                  color={share !== null ? (share >= 0.8 ? t.accent : t.text) : i === 0 || !cat ? t.accent : t.text}
+                />
+              </View>
+            );
+          })}
+          <Text style={[styles.link, { color: t.link }]} onPress={() => router.push("/budgets")}>
+            {budgets?.budgets.length ? "Edit category budgets" : "Set category budgets"}
+          </Text>
+        </Card>
+      </Reveal>
+
+      <Reveal index={5} style={styles.pair}>
         <Card style={styles.small}>
           <Text style={[styles.tag, { color: t.muted }]}>LAST 7 DAYS</Text>
           <WeekBars txns={txns} />
@@ -123,7 +171,7 @@ export default function InsightsScreen() {
       </Reveal>
 
       {summary.by_bank.length > 1 && (
-        <Reveal index={5}>
+        <Reveal index={6}>
           <Card style={{ gap: 8 }}>
             <PixelLabel style={{ marginBottom: 2 }}>By bank</PixelLabel>
             {summary.by_bank.map((b) => (
@@ -140,6 +188,7 @@ export default function InsightsScreen() {
 }
 
 function Tile({ label, value, tone, t }: { label: string; value: number; tone: "ink" | "accent" | "vista" | "paper"; t: Theme }) {
+  const formatInr = useMoney();
   const ink = tone === "ink";
   return (
     <Card tone={tone} style={styles.tile}>
@@ -169,6 +218,7 @@ function SplitBar({ buckets, t }: { buckets: Summary["buckets"]; t: Theme }) {
 }
 
 function Legend({ color, label, hint, value, earned, t }: { color: string; label: string; hint: string; value: number; earned: number; t: Theme }) {
+  const formatInr = useMoney();
   return (
     <View style={styles.row}>
       <View style={[styles.rowName, { flex: 1 }]}>
@@ -188,6 +238,7 @@ function Legend({ color, label, hint, value, earned, t }: { color: string; label
 
 function SipCard({ state, onChange, t }: { state: SipState | null; onChange: (s: SipState) => void; t: Theme }) {
   const { session } = useSession();
+  const formatInr = useMoney();
   const active = state?.sips.filter((s) => s.active) ?? [];
   const paidTotal = active.reduce((sum, s) => sum + (s.paid?.amount_minor ?? 0), 0);
   const planned = active.reduce((sum, s) => sum + s.amount_minor, 0);
@@ -264,4 +315,6 @@ const styles = StyleSheet.create({
   pair: { flexDirection: "row", gap: 12 },
   small: { flex: 1, minHeight: 118, justifyContent: "space-between", gap: 8 },
   smallValue: { fontFamily: FONT.display, fontSize: 22 },
+  subs: { flexDirection: "row", alignItems: "center", gap: 12 },
+  link: { fontSize: 14, fontWeight: "600", textDecorationLine: "underline" },
 });

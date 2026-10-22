@@ -1,12 +1,14 @@
 import { useFocusEffect } from "expo-router";
 import { useCallback } from "react";
 import { AppState } from "react-native";
+import { useOnLedgerChange } from "./events";
 
 /**
  * Runs `refresh` when the screen gains focus, when the app returns to the
  * foreground while the screen is focused, and every `intervalMs` if given.
  */
 export function useRefreshOnActive(refresh: () => void, intervalMs?: number) {
+  useOnLedgerChange(refresh); // and after an Undo changes data behind the screen
   useFocusEffect(
     useCallback(() => {
       refresh();

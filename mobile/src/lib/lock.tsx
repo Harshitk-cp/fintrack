@@ -8,6 +8,7 @@ import { Card } from "@/components/ui";
 import { PixelIcon } from "@/components/pixel-icon";
 import { Text } from "@/components/text";
 import { ApiError, verifyPin } from "./api";
+import { haptic } from "./haptics";
 import { useSession } from "./session";
 import { alpha, FONT, MOTION, PALETTE, useTheme } from "./theme";
 
@@ -87,7 +88,10 @@ function LockScreen({ onUnlock }: { onUnlock: () => void }) {
         cancelLabel: "Use PIN",
         disableDeviceFallback: true, // the fallback is the Fintrack PIN, not the phone passcode
       });
-      if (r.success) onUnlock();
+      if (r.success) {
+        haptic.success();
+        onUnlock();
+      }
     } finally {
       prompting.current = false;
     }
@@ -117,11 +121,13 @@ function LockScreen({ onUnlock }: { onUnlock: () => void }) {
     setError(null);
     try {
       await verifyPin(session, value);
+      haptic.success();
       onUnlock();
     } catch (e) {
       const code = e instanceof ApiError ? e.code : "unknown";
       // A 401 that isn't a wrong PIN means this phone's token was revoked.
       if (e instanceof ApiError && e.status === 401 && code !== "wrong_pin") return signOut();
+      haptic.error();
       // A short, soft side-to-side: says "no" without jolting.
       const step = (x: number) => withTiming(x, { duration: 70, easing: MOTION.inOut });
       shake.set(withSequence(step(-7), step(6), step(-4), step(2), withTiming(0, { duration: 140, easing: MOTION.ease })));
@@ -140,6 +146,7 @@ function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   function press(key: string) {
     if (checking) return;
     if (key === "bio") return void tryBiometric();
+    haptic.select();
     if (key === "del") return setPin((p) => p.slice(0, -1));
     if (pin.length >= 4) return;
     const next = pin + key;

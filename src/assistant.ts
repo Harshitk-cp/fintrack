@@ -7,7 +7,7 @@ import { z } from "zod";
 import { CATEGORIES, CATEGORY_IDS } from "./categories.ts";
 import type { Sql } from "./db.ts";
 import { localParts } from "./money.ts";
-import { isRefund, isSpend } from "./stats.ts";
+import { isReceived, isRefund, isSpend, netAmount } from "./stats.ts";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -87,14 +87,14 @@ export function ledgerTools(sql: Sql, userId: string, tz: string) {
       }[i.group_by];
       const groups = await sql`
         select ${key} as key,
-               coalesce(sum(t.amount_minor) filter (where ${isSpend(sql)}), 0) - coalesce(sum(t.amount_minor) filter (where ${isRefund(sql)}), 0) as net,
+               coalesce(sum(${netAmount(sql)}) filter (where ${isSpend(sql)}), 0) - coalesce(sum(t.amount_minor) filter (where ${isRefund(sql)}), 0) as net,
                count(*) filter (where ${isSpend(sql)})::int as payments
         from transactions t
         where t.user_id = ${userId} ${range(i.from, i.to)} and (${isSpend(sql)} or ${isRefund(sql)})
         group by 1 order by 2 desc limit ${i.limit}`;
       const [tot] = await sql`
-        select coalesce(sum(t.amount_minor) filter (where ${isSpend(sql)}), 0) - coalesce(sum(t.amount_minor) filter (where ${isRefund(sql)}), 0) as net,
-               coalesce(sum(t.amount_minor) filter (where t.direction = 'credit' and not t.excluded and t.event_type not in ('refund', 'card_payment', 'transfer')), 0) as received
+        select coalesce(sum(${netAmount(sql)}) filter (where ${isSpend(sql)}), 0) - coalesce(sum(t.amount_minor) filter (where ${isRefund(sql)}), 0) as net,
+               coalesce(sum(t.amount_minor) filter (where ${isReceived(sql)}), 0) as received
         from transactions t where t.user_id = ${userId} ${range(i.from, i.to)}`;
       return JSON.stringify({
         net_spent_rupees: rupees(tot!.net),

@@ -3,10 +3,13 @@ import { useCallback, useState } from "react";
 import { FlatList, Pressable, RefreshControl, StyleSheet, View } from "react-native";
 import { Text, TextInput } from "@/components/text";
 import { Chip, Empty, IconTile, inputStyle } from "@/components/ui";
-import { dismissSipSuggestion, formatInr, getSips, getTransactions, updateTransaction, type SipSuggestion, type Transaction, type TransactionPatch } from "@/lib/api";
+import { dismissSipSuggestion, getSips, getTransactions, updateTransaction, type SipSuggestion, type Transaction, type TransactionPatch } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
 import { CATEGORIES } from "@/lib/categories";
 import { formatDateTime, payeeName, REVIEW_PROMPT } from "@/lib/format";
+import { haptic } from "@/lib/haptics";
+import { useMoney } from "@/lib/privacy";
+import { useToast } from "@/lib/toast";
 import { useSession } from "@/lib/session";
 import { TAB_BAR_SPACE, useTheme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
@@ -21,7 +24,7 @@ export default function ReviewScreen() {
   const [items, setItems] = useState<Transaction[] | null>(null);
   const [sipAlerts, setSipAlerts] = useState<SipSuggestion[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const toast = useToast();
 
   const load = useCallback(async () => {
     if (!session) return;
@@ -36,12 +39,28 @@ export default function ReviewScreen() {
     setItems((cur) => cur?.filter((x) => x.id !== txn.id) ?? null); // optimistic
     try {
       const r = await updateTransaction(session, txn.id, patch);
+      haptic.success();
       const others = r.applied_to;
-      setToast(`${what}${others ? ` Also applied to ${others} other payment${others === 1 ? "" : "s"} to this payee.` : ""}`);
-      setTimeout(() => setToast(null), 3500);
-      if (others) await load();
+      if (others) {
+        // Already copied to other payments; undoing just this one would leave them changed, so no Undo here.
+        toast({ message: `${what} Also applied to ${others} other payment${others === 1 ? "" : "s"} to this payee.` });
+        await load();
+      } else {
+        toast({
+          message: what,
+          undo: async () => {
+            await updateTransaction(session, txn.id, {
+              label: txn.label, category: txn.category, event_type: txn.event_type, excluded: txn.excluded,
+              reviewed: false, forget: !!patch.remember,
+            }).catch(() => toast({ message: "Couldn't undo. Check your connection." }));
+            await load();
+            badges.refresh();
+          },
+        });
+      }
     } catch {
-      setToast("Couldn't save. Pull to refresh and try again.");
+      haptic.error();
+      toast({ message: "Couldn't save. Pull to refresh and try again." });
       await load();
     }
     badges.refresh();
@@ -90,11 +109,6 @@ export default function ReviewScreen() {
         ListEmptyComponent={items && !sipAlerts.length ? <Empty title="All caught up ✓" body="Payments we can't work out on our own will show up here." /> : undefined}
         renderItem={({ item }) => <ReviewCard txn={item} onAnswer={answer} />}
       />
-      {toast && (
-        <View style={[styles.toast, { backgroundColor: t.text }]}>
-          <Text style={{ color: t.bg, fontSize: 14 }}>{toast}</Text>
-        </View>
-      )}
     </View>
   );
 }
@@ -102,6 +116,7 @@ export default function ReviewScreen() {
 /** An alert that mentioned a SIP the assistant couldn't pin down. */
 function SipAlertCard({ alert, onDismiss }: { alert: SipSuggestion; onDismiss: () => void }) {
   const t = useTheme();
+  const formatInr = useMoney();
   return (
     <View style={[styles.card, { backgroundColor: t.card, borderColor: t.border }]}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
@@ -133,6 +148,7 @@ function SipAlertCard({ alert, onDismiss }: { alert: SipSuggestion; onDismiss: (
 
 function ReviewCard({ txn, onAnswer }: { txn: Transaction; onAnswer: (t: Transaction, p: TransactionPatch, what: string) => void }) {
   const t = useTheme();
+  const formatInr = useMoney();
   const [name, setName] = useState("");
   const askName = txn.review_reason === "unknown_payee";
   const label = name.trim() || undefined;
@@ -205,6 +221,4 @@ const styles = StyleSheet.create({
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   actions: { flexDirection: "row", justifyContent: "space-between", borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 12 },
   action: { fontSize: 15, fontWeight: "600", paddingVertical: 2 },
-  // Above the floating tab bar.
-  toast: { position: "absolute", left: 16, right: 16, bottom: TAB_BAR_SPACE + 8, borderRadius: 14, padding: 14 },
 });

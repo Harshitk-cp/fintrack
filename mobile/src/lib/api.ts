@@ -1,4 +1,5 @@
 // Typed client for the fintrack backend. Amounts are integers in paise.
+import { isCacheable, recall, remember, setOffline } from "./offline";
 
 export interface Session {
   serverUrl: string;
@@ -34,10 +35,28 @@ export interface Transaction {
   account_kind: string | null;
   last4: string | null;
   evidence_count: number;
+  /** Money back the user linked to this purchase. */
+  refunded_minor?: number;
+  /** For a refund credit: the purchase it paid back. */
+  refund_for_id?: string | null;
+}
+
+export interface RefundLink {
+  id: string;
+  amount_minor: number;
+  created_at: string;
+  purchase_id: string;
+  purchase_name: string | null;
+  purchase_at: string;
+  purchase_amount_minor: number;
+  refund_txn_id: string | null;
+  credit_name: string | null;
+  credit_at: string | null;
 }
 
 export interface TransactionDetail extends Transaction {
   evidence: { id: string; source_type: string; sender: string | null; observed_at: string; parser: string | null }[];
+  refunds: RefundLink[];
 }
 
 export interface TransactionPatch {
@@ -49,6 +68,10 @@ export interface TransactionPatch {
   amount_minor?: number;
   occurred_at?: string;
   remember?: boolean;
+  /** false puts an answered transaction back in the review queue. */
+  reviewed?: boolean;
+  /** Drops the payee rule an earlier answer created. */
+  forget?: boolean;
 }
 
 export interface ManualEntry {
@@ -114,6 +137,17 @@ export class ApiError extends Error {
 
 async function request<T>(serverUrl: string, path: string, init: RequestInit & { token?: string } = {}): Promise<T> {
   const { token, ...rest } = init;
+  // Signed-in reads of the main screens fall back to the copy kept on the phone.
+  const cacheable = !!token && (rest.method ?? "GET") === "GET" && isCacheable(path);
+  const offline = () => {
+    const hit = cacheable ? recall(path) : null;
+    if (!hit) throw new ApiError(0, "network_error");
+    setOffline(hit.at);
+    return hit.body as T;
+  };
+  // A dead connection should fall back to the cache quickly; the assistant can take a while to answer.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), cacheable ? 12_000 : 60_000);
   let res: Response;
   try {
     res = await fetch(`${serverUrl}${path}`, {
@@ -122,12 +156,18 @@ async function request<T>(serverUrl: string, path: string, init: RequestInit & {
         ...(rest.body ? { "Content-Type": "application/json" } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
+      signal: abort.signal,
     });
   } catch {
-    throw new ApiError(0, "network_error");
+    return offline();
+  } finally {
+    clearTimeout(timer);
   }
+  // The proxy answers 502/503/504 while the server is down or restarting.
+  if (res.status >= 502 && res.status <= 504) return offline();
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, body.error ?? `http_${res.status}`);
+  if (cacheable) remember(path, body);
   return body as T;
 }
 
@@ -263,13 +303,92 @@ export function logout(s: Session) {
 const authed = <T>(s: Session, path: string, method = "GET", body?: unknown) =>
   request<T>(s.serverUrl, path, { token: s.token, method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
-export function getTransactions(s: Session, o: { limit?: number; review?: boolean; q?: string; before?: string } = {}) {
+/** Search filters. Dates are local days (YYYY-MM-DD), both inclusive. */
+export interface TxnFilters {
+  q?: string;
+  from?: string;
+  to?: string;
+  direction?: "debit" | "credit";
+  min?: number;
+  max?: number;
+  categories?: string[];
+  banks?: string[];
+}
+
+export interface SearchTotals {
+  count: number;
+  spent_minor: number;
+  received_minor: number;
+}
+
+export function getTransactions(s: Session, o: { limit?: number; review?: boolean; before?: string; totals?: boolean } & TxnFilters = {}) {
   const qs = new URLSearchParams({ limit: String(o.limit ?? 100) });
   if (o.before) qs.set("before", o.before);
   if (o.review) qs.set("review", "1");
   if (o.q) qs.set("q", o.q);
-  return authed<{ transactions: Transaction[] }>(s, `/v1/transactions?${qs}`);
+  if (o.from) qs.set("from", o.from);
+  if (o.to) qs.set("to", o.to);
+  if (o.direction) qs.set("direction", o.direction);
+  if (o.min !== undefined) qs.set("min", String(o.min));
+  if (o.max !== undefined) qs.set("max", String(o.max));
+  if (o.categories?.length) qs.set("categories", o.categories.join(","));
+  if (o.banks?.length) qs.set("banks", o.banks.join(","));
+  if (o.totals) qs.set("totals", "1");
+  return authed<{ transactions: Transaction[]; totals?: SearchTotals }>(s, `/v1/transactions?${qs}`);
 }
+
+export const getBanks = (s: Session) => authed<{ banks: string[] }>(s, "/v1/transactions/banks");
+
+/** Money back for a purchase; `refund_transaction_id` is the credit it came as, if known. */
+export const addRefund = (s: Session, purchaseId: string, body: { amount_minor: number; refund_transaction_id?: string | null }) =>
+  authed<{ refund_id: string; transaction: TransactionDetail }>(s, `/v1/transactions/${purchaseId}/refunds`, "POST", body);
+export const deleteRefund = (s: Session, id: string) => authed<void>(s, `/v1/refunds/${id}`, "DELETE");
+
+export interface CategoryBudget {
+  category: string;
+  amount_minor: number;
+  spent_minor: number;
+}
+export interface Budgets {
+  month: string;
+  budgets: CategoryBudget[];
+}
+export const getBudgets = (s: Session) => authed<Budgets>(s, "/v1/budgets");
+export const setBudget = (s: Session, category: string, amount_minor: number) => authed<Budgets>(s, `/v1/budgets/${category}`, "PUT", { amount_minor });
+export const deleteBudget = (s: Session, category: string) => authed<Budgets>(s, `/v1/budgets/${category}`, "DELETE");
+
+export interface Subscription {
+  key: string;
+  name: string;
+  category: string | null;
+  bank: string | null;
+  cadence: "monthly" | "yearly";
+  amount_minor: number;
+  /** The charge before the last one, when the price changed. */
+  previous_minor: number | null;
+  monthly_minor: number;
+  last_at: string;
+  next_at: string;
+  charges: number;
+  active: boolean;
+  transaction_ids: string[];
+}
+export interface Subscriptions {
+  subscriptions: Subscription[];
+  monthly_total_minor: number;
+  yearly_total_minor: number;
+  hidden: number;
+}
+export const getSubscriptions = (s: Session) => authed<Subscriptions>(s, "/v1/subscriptions");
+export const setSubscriptionHidden = (s: Session, key: string, hidden: boolean) => authed<void>(s, "/v1/subscriptions/hidden", "PUT", { key, hidden });
+
+export type HealthState = "ok" | "warn" | "off";
+export interface Health {
+  overall: HealthState;
+  checks: { id: string; state: HealthState; title: string; detail: string }[];
+  last_sms_at: string | null;
+}
+export const getHealth = (s: Session) => authed<Health>(s, "/v1/health");
 
 export const getSummary = (s: Session) => authed<Summary>(s, "/v1/summary");
 export const getTransaction = (s: Session, id: string) => authed<{ transaction: TransactionDetail }>(s, `/v1/transactions/${id}`);

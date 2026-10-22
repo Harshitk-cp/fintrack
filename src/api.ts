@@ -7,13 +7,16 @@ import { BUCKET, CATEGORIES, CATEGORY_IDS } from "./categories.ts";
 import { newDeviceToken, normalizePairingCode, sha256, type Sealer } from "./crypto.ts";
 import type { Sql } from "./db.ts";
 import { ingestSms } from "./ingest.ts";
-import { createManual, deleteManual, getTransaction, listTransactions, updateTransaction } from "./ledger.ts";
+import { healthChecks } from "./health.ts";
+import { createManual, deleteManual, getTransaction, listBanks, listTransactions, transactionTotals, updateTransaction } from "./ledger.ts";
+import { addRefund, removeRefund } from "./refunds.ts";
+import { findSubscriptions } from "./subscriptions.ts";
 import { newPushTopic, type Notifier } from "./notify.ts";
 import { imapServerFor } from "./mail/filter.ts";
 import { MailAuthError, MailHostError, type MailSource } from "./mail/source.ts";
 import { markPaid } from "./sips.ts";
 import { looksLikeOtp } from "./sms/parser.ts";
-import { isReceived, isRefund, isSaved, isSpend } from "./stats.ts";
+import { isReceived, isRefund, isSaved, isSpend, netAmount } from "./stats.ts";
 
 interface Device {
   id: string;
@@ -50,12 +53,25 @@ const SmsBody = z.object({
   source_id: z.preprocess(blankToUndefined, z.string().max(200).optional()),
 });
 
+// A real calendar date: 2026-02-30 fails because it doesn't round-trip.
+const LocalDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((s) => { const d = new Date(`${s}T00:00:00Z`); return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s); });
+const csv = <T extends z.ZodType<string, string>>(item: T) => z.string().max(800).transform((s) => s.split(",").map((x) => x.trim()).filter(Boolean)).pipe(z.array(item).max(30));
 const ListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   before: z.iso.datetime({ offset: true }).optional(),
   review: z.enum(["1", "true"]).optional(),
   category: z.enum(CATEGORY_IDS).optional(),
   q: z.string().trim().min(1).max(100).optional(),
+  // Search filters. Dates are local days in the user's time zone, both inclusive.
+  from: LocalDate.optional(),
+  to: LocalDate.optional(),
+  direction: z.enum(["debit", "credit"]).optional(),
+  min: z.coerce.number().int().min(0).max(100_000_000_000).optional(),
+  max: z.coerce.number().int().min(0).max(100_000_000_000).optional(),
+  categories: csv(z.enum([...CATEGORY_IDS, "none"])).optional(),
+  banks: csv(z.string().min(1).max(60)).optional(),
+  /** Also return count and sums for everything matched (first page only). */
+  totals: z.enum(["1", "true"]).optional(),
 });
 
 const Id = z.object({ id: z.uuid() });
@@ -83,6 +99,10 @@ const PatchBody = z.object({
   amount_minor: z.number().int().positive().max(1_000_000_000).optional(),
   occurred_at: z.iso.datetime({ offset: true }).optional(),
   remember: z.boolean().optional(),
+  /** false puts it back in the review queue (undoing an answer). */
+  reviewed: z.boolean().optional(),
+  /** Drops the payee rule an earlier answer created (undoing "remember for this payee"). */
+  forget: z.boolean().optional(),
 });
 
 const SettingsBody = z.object({
@@ -346,20 +366,20 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
         and to_char(t.occurred_at at time zone ${tz}, 'YYYY-MM') = ${month}`;
     const [totals] = await sql`
       select
-        coalesce(sum(amount_minor) filter (where ${isSpend(sql)}), 0) as spent_minor,
+        coalesce(sum(${netAmount(sql)}) filter (where ${isSpend(sql)}), 0) as spent_minor,
         coalesce(sum(amount_minor) filter (where ${isRefund(sql)}), 0) as refunds_minor,
         coalesce(sum(amount_minor) filter (where ${isReceived(sql)}), 0) as received_minor,
         coalesce(sum(amount_minor) filter (where t.event_type = 'cash_withdrawal' and not t.excluded), 0) as cash_withdrawn_minor,
-        coalesce(sum(amount_minor) filter (where ${isSaved(sql)}), 0) as invested_minor,
+        coalesce(sum(${netAmount(sql)}) filter (where ${isSaved(sql)}), 0) as invested_minor,
         count(*) filter (where not t.excluded)::int as transaction_count
       ${scope}`;
     const byBank = await sql`
       select coalesce(t.institution_name, 'Unknown bank') as institution_name,
-             sum(amount_minor) as spent_minor, count(*)::int as transaction_count
+             sum(${netAmount(sql)}) as spent_minor, count(*)::int as transaction_count
       ${scope} and ${isSpend(sql)}
       group by 1 order by 2 desc`;
     const byCategory = await sql`
-      select t.category, sum(amount_minor) as spent_minor, count(*)::int as transaction_count
+      select t.category, sum(${netAmount(sql)}) as spent_minor, count(*)::int as transaction_count
       ${scope} and ${isSpend(sql)}
       group by 1 order by 2 desc`;
     // SIPs marked paid that no bank message matched; ones linked to a transaction are already in invested_minor.
@@ -394,14 +414,33 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
   app.get("/v1/transactions", authed, async (req, reply) => {
     const q = ListQuery.safeParse(req.query);
     if (!q.success) return reply.code(400).send({ error: "invalid_query", issues: q.error.issues });
-    const transactions = await listTransactions(sql, req.device.userId, {
-      limit: q.data.limit,
-      before: q.data.before ? new Date(q.data.before) : undefined,
-      review: !!q.data.review,
-      category: q.data.category,
-      q: q.data.q,
-    });
-    return { transactions };
+    const d = q.data;
+    const [u] = await sql`select time_zone from users where id = ${req.device.userId}`;
+    const filter = {
+      review: !!d.review, category: d.category, q: d.q, from: d.from, to: d.to, tz: u!.time_zone as string,
+      direction: d.direction, minMinor: d.min, maxMinor: d.max, categories: d.categories, banks: d.banks,
+    };
+    const transactions = await listTransactions(sql, req.device.userId, { ...filter, limit: d.limit, before: d.before ? new Date(d.before) : undefined });
+    return { transactions, ...(d.totals ? { totals: await transactionTotals(sql, req.device.userId, filter) } : {}) };
+  });
+
+  app.get("/v1/transactions/banks", authed, async (req) => ({ banks: await listBanks(sql, req.device.userId) }));
+
+  // Marks money back for a purchase, optionally tied to the credit it came as.
+  const RefundBody = z.object({ amount_minor: z.number().int().positive().max(1_000_000_000), refund_transaction_id: z.uuid().nullable().optional() });
+  app.post("/v1/transactions/:id/refunds", authed, async (req, reply) => {
+    const p = Id.safeParse(req.params);
+    const b = RefundBody.safeParse(req.body);
+    if (!p.success || !b.success) return reply.code(400).send({ error: "invalid_body" });
+    const r = await addRefund(sql, req.device.userId, p.data.id, b.data.amount_minor, b.data.refund_transaction_id ?? null);
+    if (!r.ok) return reply.code(r.error === "not_found" || r.error === "credit_not_found" ? 404 : 409).send({ error: r.error });
+    return reply.code(201).send({ refund_id: r.id, transaction: await getTransaction(sql, req.device.userId, p.data.id) });
+  });
+
+  app.delete("/v1/refunds/:id", authed, async (req, reply) => {
+    const p = Id.safeParse(req.params);
+    if (!p.success) return reply.code(400).send({ error: "invalid_id" });
+    return (await removeRefund(sql, req.device.userId, p.data.id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
   });
 
   app.post("/v1/transactions", authed, async (req, reply) => {
@@ -665,6 +704,50 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
     await sql`update sip_suggestions set status = 'dismissed' where id = ${id.data.id} and user_id = ${req.device.userId}`;
     return reply.code(204).send();
   });
+
+  // Monthly limits per category, with this month's spending against each.
+  async function budgetsOut(userId: string, month?: string) {
+    const [u] = await sql`select time_zone from users where id = ${userId}`;
+    const m = month ?? new Intl.DateTimeFormat("en-CA", { timeZone: u!.time_zone, year: "numeric", month: "2-digit" }).format(new Date());
+    const rows = await sql`
+      select b.category, b.amount_minor,
+             coalesce((select sum(${netAmount(sql)}) from transactions t
+                       where t.user_id = b.user_id and t.category = b.category and ${isSpend(sql)}
+                         and to_char(t.occurred_at at time zone ${u!.time_zone}, 'YYYY-MM') = ${m}), 0) as spent_minor
+      from category_budgets b where b.user_id = ${userId} order by b.amount_minor desc`;
+    return { month: m, budgets: rows.map((r) => ({ category: r.category, amount_minor: Number(r.amount_minor), spent_minor: Number(r.spent_minor) })) };
+  }
+
+  app.get("/v1/budgets", authed, async (req) => budgetsOut(req.device.userId));
+
+  const SpendCategory = z.enum(CATEGORY_IDS).refine((c) => c !== "income" && c !== "investments");
+  app.put("/v1/budgets/:category", authed, async (req, reply) => {
+    const c = SpendCategory.safeParse((req.params as { category?: string }).category);
+    const b = z.object({ amount_minor: z.number().int().positive().max(10_000_000_000) }).safeParse(req.body);
+    if (!c.success || !b.success) return reply.code(400).send({ error: "invalid_body" });
+    await sql`
+      insert into category_budgets (user_id, category, amount_minor) values (${req.device.userId}, ${c.data}, ${b.data.amount_minor})
+      on conflict (user_id, category) do update set amount_minor = excluded.amount_minor`;
+    return budgetsOut(req.device.userId);
+  });
+
+  app.delete("/v1/budgets/:category", authed, async (req) => {
+    await sql`delete from category_budgets where user_id = ${req.device.userId} and category = ${String((req.params as { category?: string }).category ?? "")}`;
+    return budgetsOut(req.device.userId);
+  });
+
+  app.get("/v1/subscriptions", authed, async (req) => findSubscriptions(sql, req.device.userId));
+
+  /** "Not a subscription": hides a payee from the list, or shows it again (undo). */
+  app.put("/v1/subscriptions/hidden", authed, async (req, reply) => {
+    const b = z.object({ key: z.string().regex(/^[a-z]{3,120}$/), hidden: z.boolean() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: "invalid_body" });
+    if (b.data.hidden) await sql`insert into subscription_hides (user_id, payee_key) values (${req.device.userId}, ${b.data.key}) on conflict do nothing`;
+    else await sql`delete from subscription_hides where user_id = ${req.device.userId} and payee_key = ${b.data.key}`;
+    return reply.code(204).send();
+  });
+
+  app.get("/v1/health", authed, async (req) => healthChecks(sql, req.device.userId, { mail: !!mail, ntfy: !!notifier?.pushServer, fcm }));
 
   // The banner asking people to connect a mailbox: after each dismissal it waits
   // 1 day, then 7 days, then stops for good. `pending` (no mailbox yet) drives the

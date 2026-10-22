@@ -1,11 +1,15 @@
 import * as Clipboard from "expo-clipboard";
 import { useCallback, useEffect, useState } from "react";
-import { Linking, PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, View } from "react-native";
+import { router } from "expo-router";
+import { Linking, PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { PixelIcon } from "@/components/pixel-icon";
 import { MailSettings } from "@/components/mail-settings";
 import { Text, TextInput } from "@/components/text";
 import SmsCollector, { type CollectorStatus } from "../../../../modules/sms-collector";
 import { Chip, inputStyle, Row as UiRow, Section as UiSection } from "@/components/ui";
-import { ApiError, changePin, formatInr, getSettings, logout, parseRupees, sendTestPush, updateSettings, type Settings } from "@/lib/api";
+import { ApiError, changePin, formatInr, getHealth, getSettings, logout, parseRupees, sendTestPush, updateSettings, type Health, type Settings } from "@/lib/api";
+import { haptic } from "@/lib/haptics";
+import { usePrivacy } from "@/lib/privacy";
 import { enableAndroidPush, type AndroidPushState } from "@/lib/push";
 import { useSession } from "@/lib/session";
 import { TAB_BAR_SPACE, useTheme, type Theme } from "@/lib/theme";
@@ -23,6 +27,8 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.body} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled">
+      <HealthSection />
+      <PrivacySection />
       <AlertSettings />
       <MailSettings />
 
@@ -38,6 +44,66 @@ export default function SettingsScreen() {
         <Text style={{ color: t.dangerText, fontSize: 16, fontWeight: "600" }}>Sign out of this phone</Text>
       </Pressable>
     </ScrollView>
+  );
+}
+
+/** What's feeding the ledger, and whether it's still working. The same checks drive the warning on Home. */
+function HealthSection() {
+  const t = useTheme();
+  const { session } = useSession();
+  const [health, setHealth] = useState<Health | null>(null);
+  const [collector, setCollector] = useState<CollectorStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const check = useCallback(async () => {
+    if (!session) return;
+    setChecking(true);
+    const [h, c] = await Promise.all([getHealth(session).catch(() => null), SmsCollector?.getStatus().catch(() => null) ?? null]);
+    if (h) setHealth(h);
+    setCollector(c);
+    setChecking(false);
+  }, [session]);
+  useRefreshOnActive(useCallback(() => void check(), [check]));
+  if (!health) return null;
+
+  // On Android the phone itself knows if SMS access was taken away; say so before anything else.
+  const checks = [
+    ...(collector && !collector.hasPermission
+      ? [{ id: "perm", state: "warn" as const, title: "SMS access is off", detail: "Fintrack can't see bank SMS on this phone. Allow it under SMS collector below." }]
+      : []),
+    ...health.checks,
+  ];
+  const bad = checks.filter((c) => c.state === "warn").length;
+  return (
+    <UiSection title="Health check" footer={bad ? undefined : "Everything that feeds your ledger is working."}>
+      {checks.map((c) => (
+        <View key={c.id} style={styles.check}>
+          <View style={[styles.checkIcon, { backgroundColor: c.state === "warn" ? t.accent : c.state === "ok" ? t.ink : "transparent", borderColor: t.border }, c.state === "off" && { borderWidth: 1.5 }]}>
+            {c.state === "ok" && <PixelIcon name="check" size={14} color={t.onInk} />}
+            {c.state === "warn" && <Text style={{ color: t.onAccent, fontWeight: "800", fontSize: 13 }}>!</Text>}
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: "600" }}>{c.title}</Text>
+            <Text style={{ color: t.muted, fontSize: 13, lineHeight: 18, marginTop: 2 }}>{c.detail}</Text>
+          </View>
+        </View>
+      ))}
+      <View style={styles.chipsRow}>
+        <Chip label={checking ? "Checking…" : "Check again"} icon="reload" onPress={() => void check()} disabled={checking} />
+      </View>
+    </UiSection>
+  );
+}
+
+function PrivacySection() {
+  const t = useTheme();
+  const privacy = usePrivacy();
+  return (
+    <UiSection title="Privacy" footer="Shows every amount as ₹ •••• until you turn it off. Also on Home: tap the eye.">
+      <View style={styles.inline}>
+        <Text style={[styles.inlineLabel, { color: t.text }]}>Hide amounts</Text>
+        <Switch value={privacy.hidden} onValueChange={privacy.toggle} trackColor={{ true: t.accent }} accessibilityLabel="Hide amounts" />
+      </View>
+    </UiSection>
   );
 }
 
@@ -188,6 +254,17 @@ function AlertSettings() {
             }}
           />
         </View>
+        <Pressable
+          onPress={() => {
+            haptic.tap();
+            router.push("/budgets");
+          }}
+          accessibilityRole="button"
+          style={styles.inline}
+        >
+          <Text style={[styles.inlineLabel, { color: t.text }]}>Category budgets</Text>
+          <PixelIcon name="chevron-right" size={18} color={t.muted} />
+        </Pressable>
       </UiSection>
 
       {Platform.OS === "android" && s.fcm?.available ? (
@@ -382,4 +459,6 @@ const styles = StyleSheet.create({
   small: { minWidth: 96, paddingVertical: 8, textAlign: "right" },
   stepper: { flexDirection: "row", alignItems: "center", gap: 6 },
   chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  check: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
+  checkIcon: { width: 24, height: 24, borderRadius: 12, alignItems: "center", justifyContent: "center", marginTop: 1 },
 });

@@ -1,9 +1,10 @@
 import { router } from "expo-router";
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
-import { formatInr, type Transaction } from "@/lib/api";
+import type { Transaction } from "@/lib/api";
 import { CATEGORIES, category } from "@/lib/categories";
 import { formatTime, kindLabel, payeeName } from "@/lib/format";
+import { useMoney } from "@/lib/privacy";
 import { alpha, FONT, PALETTE, RADIUS, useTheme, type Theme } from "@/lib/theme";
 import { CyberButton, PixelLabel, PressScale } from "./cyber";
 import { PixelIcon, type PixelIconName } from "./pixel-icon";
@@ -49,6 +50,7 @@ export function Chip({ label, selected, onPress, disabled, icon }: { label: stri
     <PressScale
       onPress={onPress}
       disabled={disabled}
+      feel="select"
       scale={0.97}
       accessibilityLabel={label}
       style={[styles.chip, { borderColor: selected ? t.ink : t.border, backgroundColor: selected ? t.ink : t.card, opacity: disabled ? 0.5 : 1 }]}
@@ -108,10 +110,12 @@ export function IconTile({ name, hot, size = 40 }: { name: PixelIconName; hot?: 
 /** One transaction in a grouped list. Tapping opens its detail screen. */
 export function TxnRow({ txn, first, last }: { txn: Transaction; first: boolean; last: boolean }) {
   const t = useTheme();
+  const money = useMoney();
+  const refunded = txn.refunded_minor ?? 0;
   const credit = txn.direction === "credit";
   const needsReview = !!txn.review_reason && !txn.reviewed_at;
   const cat = category(txn.category);
-  const meta = [txn.institution_name ?? "Unknown bank", cat?.name ?? kindLabel(txn), formatTime(txn.occurred_at)].filter(Boolean).join(" · ");
+  const meta = [txn.institution_name ?? "Unknown bank", refunded ? (refunded >= txn.amount_minor ? "Refunded" : "Part refunded") : (cat?.name ?? kindLabel(txn)), formatTime(txn.occurred_at)].filter(Boolean).join(" · ");
   return (
     <Pressable
       onPress={() => router.push(`/transaction/${txn.id}`)}
@@ -135,7 +139,7 @@ export function TxnRow({ txn, first, last }: { txn: Transaction; first: boolean;
       <View style={[styles.amountWrap, credit && !txn.excluded && { backgroundColor: t.vista }]}>
         <Text style={[styles.amount, { color: txn.excluded ? t.muted : t.text }, txn.excluded && { textDecorationLine: "line-through" }]}>
           {credit ? "+" : ""}
-          {formatInr(txn.amount_minor)}
+          {money(txn.amount_minor)}
         </Text>
       </View>
     </Pressable>

@@ -182,12 +182,17 @@ All `/v1` routes require `Authorization: Bearer <device token>` and are limited 
 | Route | Purpose |
 |---|---|
 | `POST /v1/sms` | `{ body, sender?, received_at?, source_id? }` → `{ evidenceId, status, reason, transactionId, duplicate }`. Returns `422` for OTPs. |
-| `GET /v1/transactions?limit=&before=&review=1&category=&q=` | Newest first, scoped to the token's user. `review=1` lists the review queue |
+| `GET /v1/transactions?limit=&before=&review=1&category=&q=` | Newest first, scoped to the token's user. `review=1` lists the review queue. Search filters: `from`/`to` (local `YYYY-MM-DD`, inclusive), `direction`, `min`/`max` (paise), `categories` and `banks` (comma-separated; category `none` is uncategorised). `totals=1` adds `{ count, spent_minor, received_minor }` for every match |
+| `GET /v1/transactions/banks` | Bank names the user has transactions with, for the bank filter |
+| `POST /v1/transactions/:id/refunds`, `DELETE /v1/refunds/:id` | Money back for a purchase: `{ amount_minor, refund_transaction_id? }`. The purchase then counts at its amount minus refunds; a linked credit stops counting as money received (`409 more_than_purchase`, `more_than_credit`, `credit_already_linked`) |
 | `POST /v1/transactions` | Manual entry: `{ amount_minor, direction, counterparty, category?, occurred_at?, paid_with?, note? }` |
 | `GET /v1/transactions/:id` | One transaction, plus where it came from (sender and parser, never the SMS text) |
-| `PATCH /v1/transactions/:id` | `{ label?, category?, note?, event_type?, excluded?, remember? }`. Marks it reviewed. `remember` saves a payee rule and returns `applied_to` |
+| `PATCH /v1/transactions/:id` | `{ label?, category?, note?, event_type?, excluded?, remember?, reviewed?, forget? }`. Marks it reviewed. `remember` saves a payee rule and returns `applied_to`. Undo sends the old values with `reviewed: false` (back to the review queue) and `forget: true` (drops the payee rule) |
 | `DELETE /v1/transactions/:id` | Manual entries only |
 | `GET /v1/summary?month=YYYY-MM` | Month totals, by bank and by category, budget and review count |
+| `GET /v1/budgets`, `PUT /v1/budgets/:category`, `DELETE /v1/budgets/:category` | Monthly limits per category with this month's spending. The notifier sends one calm note at 80% and one at 100% |
+| `GET /v1/subscriptions`, `PUT /v1/subscriptions/hidden` | Recurring charges worked out from the ledger (same payee, similar amount, monthly or yearly), with monthly and yearly totals and price rises. `PUT { key, hidden }` hides one, or shows it again |
+| `GET /v1/health` | Whether bank SMS are still arriving, each mailbox is being read, and notifications have somewhere to go. After 3 quiet days the notifier also sends one heads-up |
 | `GET /v1/notifications`, `POST /v1/notifications/read` | The inbox |
 | `GET/PATCH /v1/settings`, `POST /v1/settings/push/test` | Alert threshold, digest hour, budget, push on/off |
 | `GET /v1/mail`, `PUT /v1/mail`, `DELETE /v1/mail/:id`, `POST /v1/mail/sync[?id=]` | Bank-email mailboxes, up to 5 per user. `PUT { address, app_password, host? }` adds one, or updates the password of that address; it checks the login first (`422 auth_failed`, `connect_failed`, `bad_host`, `unknown_provider`; `409 too_many_mailboxes`) |

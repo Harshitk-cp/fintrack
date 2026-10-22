@@ -1,5 +1,5 @@
 import { router } from "expo-router";
-import { Pressable, StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { useBadges } from "@/lib/badges";
 import { FONT, MOTION, RADIUS, useTheme } from "@/lib/theme";
@@ -12,12 +12,12 @@ import { Card } from "./ui";
  * Home banner asking to connect a mailbox. Dismissing it tells the server, which
  * brings it back after a day, then after a week, then never.
  */
-export function MailNudge() {
+export function MailNudge({ style }: { style?: StyleProp<ViewStyle> } = {}) {
   const t = useTheme();
   const { mailNudge, dismissMailNudge } = useBadges();
   if (!mailNudge) return null;
   return (
-    <Animated.View entering={FadeIn.duration(MOTION.slow).easing(MOTION.ease)} exiting={FadeOut.duration(MOTION.base).easing(MOTION.ease)} style={styles.wrap}>
+    <Animated.View entering={FadeIn.duration(MOTION.slow).easing(MOTION.ease)} exiting={FadeOut.duration(MOTION.base).easing(MOTION.ease)} style={[styles.wrap, style]}>
       <Card style={styles.card}>
         <View style={styles.top}>
           <View style={[styles.tile, { backgroundColor: t.accent }]}>

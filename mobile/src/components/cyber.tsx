@@ -7,6 +7,7 @@ import Animated, {
   Easing, FadeInDown, interpolate, useAnimatedProps, useAnimatedStyle, useSharedValue, withDelay, withRepeat, withTiming,
 } from "react-native-reanimated";
 import Svg, { Circle, Defs, Path, Pattern, Rect } from "react-native-svg";
+import { haptic } from "@/lib/haptics";
 import { alpha, FONT, MOTION, PALETTE, RADIUS, useTheme } from "@/lib/theme";
 import { PixelIcon } from "./pixel-icon";
 import { Text, TextInput } from "./text";
@@ -43,15 +44,23 @@ export function Reveal({ index = 0, children, style }: { index?: number; childre
   );
 }
 
-/** Pressable that eases down slightly on touch. */
-export function PressScale({ children, onPress, disabled, style, scale = 0.98, accessibilityLabel }: {
-  children: ReactNode; onPress?: () => void; disabled?: boolean; style?: StyleProp<ViewStyle>; scale?: number; accessibilityLabel?: string;
+/** Pressable that eases down slightly on touch, with a light haptic tap (or a selection tick for chips). */
+export function PressScale({ children, onPress, onLongPress, disabled, style, scale = 0.98, accessibilityLabel, feel = "tap" }: {
+  children: ReactNode; onPress?: () => void; onLongPress?: () => void; disabled?: boolean; style?: StyleProp<ViewStyle>; scale?: number; accessibilityLabel?: string;
+  feel?: "tap" | "select" | "none";
 }) {
   const s = useSharedValue(1);
   const a = useAnimatedStyle(() => ({ transform: [{ scale: s.get() }] }));
   return (
     <Pressable
-      onPress={onPress}
+      onPress={
+        onPress &&
+        (() => {
+          if (feel !== "none") haptic[feel]();
+          onPress();
+        })
+      }
+      onLongPress={onLongPress}
       disabled={disabled}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
@@ -82,7 +91,10 @@ export function CyberButton({ title, onPress, kind = "primary", busy, disabled, 
 
   return (
     <Pressable
-      onPress={onPress}
+      onPress={() => {
+        haptic.tap();
+        onPress();
+      }}
       disabled={off}
       accessibilityRole="button"
       accessibilityLabel={title}

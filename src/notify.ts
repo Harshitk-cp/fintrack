@@ -9,7 +9,8 @@ import { paceLevel, plainNote, type Coach, type PaceFacts } from "./coach.ts";
 import type { FcmMessage, FcmResult } from "./fcm.ts";
 import type { Sql } from "./db.ts";
 import { formatInr, localParts } from "./money.ts";
-import { monthEnd, monthStart, netSpend, topCategories } from "./stats.ts";
+import { SMS_STALE_DAYS } from "./health.ts";
+import { isSpend, monthEnd, monthStart, netAmount, netSpend, topCategories } from "./stats.ts";
 
 export interface PushMessage {
   title: string;
@@ -199,6 +200,9 @@ export class Notifier {
         }
       }
 
+      await this.#categoryBudgets(u.id, u.time_zone, local);
+      if (local.hour >= u.digest_hour) await this.#smsStopped(u.id);
+
       if (local.hour >= u.digest_hour) {
         const [exists] = await sql`select 1 from notifications where user_id = ${u.id} and dedupe_key = ${`digest:${local.date}`}`;
         if (exists) continue;
@@ -250,6 +254,51 @@ export class Notifier {
     };
     const note = this.#coach ? await this.#coach.write(facts).catch(() => plainNote(facts)) : plainNote(facts);
     await insert(sql, { userId: u.id, kind: "insight", dedupeKey: key, title: note.title, body: note.body });
+  }
+
+  /**
+   * Category budgets: a calm note at 80% and another at 100%, once each per month.
+   * Factual and kind; it never tells anyone off.
+   */
+  async #categoryBudgets(userId: string, tz: string, local: ReturnType<typeof localParts>) {
+    const sql = this.#sql;
+    const rows = await sql`
+      select b.category, b.amount_minor,
+             coalesce((select sum(${netAmount(sql)}) from transactions t
+                       where t.user_id = b.user_id and t.category = b.category and ${isSpend(sql)}
+                         and to_char(t.occurred_at at time zone ${tz}, 'YYYY-MM') = ${local.month}), 0) as spent
+      from category_budgets b where b.user_id = ${userId}`;
+    if (!rows.length) return;
+    const [y, m, d] = local.date.split("-").map(Number) as [number, number, number];
+    const daysLeft = new Date(Date.UTC(y, m, 0)).getUTCDate() - d;
+    for (const r of rows) {
+      const limit = Number(r.amount_minor);
+      const spent = Number(r.spent);
+      const step = [...BUDGET_STEPS].reverse().find((s) => spent >= (limit * s) / 100);
+      if (!step) continue;
+      const name = categoryName(r.category) ?? r.category;
+      const left = daysLeft === 0 ? "the last day of the month" : `${daysLeft} day${daysLeft === 1 ? "" : "s"} to go`;
+      await insert(sql, {
+        userId, kind: "budget", dedupeKey: `catbudget:${local.month}:${r.category}:${step}`,
+        title: step >= 100 ? `${name} budget reached` : `${name} is at ${step}% of its budget`,
+        body: step >= 100
+          ? `${formatInr(spent)} of ${formatInr(limit)} this month, ${left}. No stress: there's just less room here until the 1st.`
+          : `${formatInr(spent)} of ${formatInr(limit)} spent, ${left}. A lighter few days would keep it comfortable.`,
+      });
+    }
+  }
+
+  /** One heads-up when bank SMS stop arriving, so a broken forwarder doesn't go unnoticed for weeks. */
+  async #smsStopped(userId: string) {
+    const sql = this.#sql;
+    const [last] = await sql`
+      select id, observed_at from evidence where user_id = ${userId} and source_type = 'sms' order by observed_at desc limit 1`;
+    if (!last || this.#now().getTime() - new Date(last.observed_at).getTime() < SMS_STALE_DAYS * 86_400_000) return;
+    await insert(sql, {
+      userId, kind: "insight", dedupeKey: `health:sms:${last.id}`, // once per quiet spell
+      title: `No bank SMS for ${SMS_STALE_DAYS} days`,
+      body: "If you've paid by card or UPI since, SMS forwarding may have stopped. Settings shows what's working.",
+    });
   }
 
   /** Writes the salary check-ins; without one they use a plain message. */
