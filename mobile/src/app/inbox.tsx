@@ -11,7 +11,7 @@ import { useSession } from "@/lib/session";
 import { useTheme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
 
-const ICON: Record<AppNotification["kind"], PixelIconName> = { transaction: "coins", review: "warning-diamond", digest: "chart-line", budget: "wallet" };
+const ICON: Record<AppNotification["kind"], PixelIconName> = { transaction: "coins", review: "warning-diamond", digest: "chart-line", budget: "wallet", insight: "sparkles" };
 
 export default function InboxScreen() {
   const t = useTheme();

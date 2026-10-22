@@ -2,14 +2,15 @@ import { router, Stack } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import { RefreshControl, SectionList, StyleSheet, View } from "react-native";
 import { Text, TextInput } from "@/components/text";
-import { Gauge, Meter, MiniBars, PixelLabel, PressScale, Reveal, useCountUp, Wordmark } from "@/components/cyber";
+import { CyberButton, Gauge, PressScale, Reveal, useCountUp, Wordmark } from "@/components/cyber";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { MailNudge } from "@/components/mail-nudge";
 import { PixelIcon } from "@/components/pixel-icon";
 import { Card, Empty, HeaderButton, TxnRow } from "@/components/ui";
 import { ApiError, formatInr, getSummary, getTransactions, type Summary, type Transaction } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
-import { category, categoryLabel } from "@/lib/categories";
 import { TZ } from "@/lib/format";
+import { groupByDay } from "@/lib/group";
 import { useSession } from "@/lib/session";
 import { FONT, RADIUS, TAB_BAR_SPACE, useTheme, type Theme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
@@ -28,7 +29,7 @@ export default function HomeScreen() {
   const load = useCallback(async () => {
     if (!session) return;
     try {
-      const [s, list] = await Promise.all([getSummary(session), getTransactions(session, { q: query.trim() || undefined })]);
+      const [s, list] = await Promise.all([getSummary(session), getTransactions(session, { q: query.trim() || undefined, limit: 200 })]);
       setSummary(s);
       setTxns(list.transactions);
       setError(null);
@@ -57,18 +58,30 @@ export default function HomeScreen() {
   };
 
   const searching = query.trim().length > 0;
+  // Home shows the last 10 days that have transactions (gaps don't count); search covers everything.
+  const days = groupByDay(txns ?? []);
+  const sections = searching ? days : days.slice(0, HOME_DAYS);
   return (
-    <>
+    // The list starts below the status bar, so nothing scrolls under the clock and the
+    // pull-to-refresh spinner isn't hidden behind the notch.
+    <View style={{ flex: 1, paddingTop: insets.top }}>
       {/* Own header: the system one draws iOS glass circles behind its buttons, which clash with the theme. */}
       <Stack.Screen options={{ headerShown: false }} />
       <SectionList
-        sections={groupByDay(txns ?? [])}
+        sections={sections}
         keyExtractor={(item) => item.id}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.muted} />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.accent} colors={[t.accent]} progressBackgroundColor={t.card} />
+        }
         contentContainerStyle={{ paddingBottom: TAB_BAR_SPACE }}
         stickySectionHeadersEnabled={false}
+        ListFooterComponent={
+          !searching && (txns?.length ?? 0) > 0 ? (
+            <CyberButton title="See all transactions" kind="primary" onPress={() => router.push("/transactions")} style={styles.seeAll} />
+          ) : undefined
+        }
         ListHeaderComponent={
-          <View style={{ paddingTop: insets.top + 6 }}>
+          <View style={{ paddingTop: 6 }}>
             <View style={styles.header}>
               <HeaderButton label="Inbox" icon="bell" badge={badges.unread} onPress={() => router.push("/inbox")} />
               <Wordmark size={20} />
@@ -88,8 +101,9 @@ export default function HomeScreen() {
                 accessibilityLabel="Search transactions"
               />
             </View>
+            {!searching && <MailNudge />}
             {error && <Text style={[styles.error, { color: t.dangerText }]}>{error}</Text>}
-            {summary && !searching && <SummaryBento summary={summary} txns={txns ?? []} t={t} />}
+            {summary && !searching && <SummaryBento summary={summary} t={t} />}
           </View>
         }
         ListEmptyComponent={
@@ -104,88 +118,57 @@ export default function HomeScreen() {
         renderSectionHeader={({ section }) => <Text style={[styles.day, { color: t.muted }]}>{section.title}</Text>}
         renderItem={({ item, index, section }) => <TxnRow txn={item} first={index === 0} last={index === section.data.length - 1} />}
       />
-    </>
+    </View>
   );
 }
 
-const isSpendTxn = (x: Transaction) =>
-  x.direction === "debit" && !x.excluded && !["card_payment", "transfer", "cash_withdrawal"].includes(x.event_type);
+/** Home lists the last 10 days that have transactions; "See all" has the rest. */
+const HOME_DAYS = 10;
 
-/** Spending per day for the last 7 days (oldest first), from the loaded transactions. */
-function lastSevenDays(txns: Transaction[]) {
-  const key = new Intl.DateTimeFormat("en-CA", { timeZone: TZ });
-  const day = new Intl.DateTimeFormat("en-IN", { weekday: "narrow", timeZone: TZ });
-  const now = Date.now();
-  const days = Array.from({ length: 7 }, (_, i) => new Date(now - (6 - i) * 86_400_000));
-  const index = new Map(days.map((d, i) => [key.format(d), i]));
-  const values = days.map(() => 0);
-  for (const x of txns) {
-    const i = index.get(key.format(new Date(x.occurred_at)));
-    if (i !== undefined && isSpendTxn(x)) values[i]! += x.amount_minor;
-  }
-  return { values, labels: days.map((d) => day.format(d)) };
-}
-
-function SummaryBento({ summary, txns, t }: { summary: Summary; txns: Transaction[]; t: Theme }) {
+/** Home keeps one number: how much of what came in has gone out. The breakdown lives on Insights. */
+function SummaryBento({ summary, t }: { summary: Summary; t: Theme }) {
   const monthName = new Date(`${summary.month}-01T12:00:00Z`).toLocaleString("en-IN", { month: "long", timeZone: TZ });
-  const budget = summary.budget_minor;
   const total = useCountUp(summary.net_spent_minor);
-  // The dial shows budget used; without a budget it shows how far through the month we are.
+  const earned = summary.income_minor ?? (summary.received_minor || null);
   const today = new Date();
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  const dial = budget ? summary.net_spent_minor / budget : today.getDate() / daysInMonth;
-  const dialTag = budget ? `${Math.round((summary.net_spent_minor / budget) * 100)}% of budget` : `Day ${today.getDate()}/${daysInMonth}`;
-  const week = lastSevenDays(txns);
-  const maxCat = Math.max(1, ...summary.by_category.map((c) => c.spent_minor));
+  const share = earned ? summary.net_spent_minor / earned : null;
+  const tag = share !== null ? `${Math.round(share * 100)}% used` : `Day ${today.getDate()}/${daysInMonth}`;
+  const behind = share !== null && share > today.getDate() / daysInMonth + 0.1; // spending ahead of the month
 
   return (
     <View style={styles.bento}>
       <Reveal index={0}>
-        <Card tone="ink" style={styles.hero}>
-          <View style={styles.heroTop}>
-            <Text style={[styles.tag, { color: t.inkMuted }]}>{`SPENT · ${monthName.toUpperCase()}`}</Text>
-            <View style={[styles.pill, { backgroundColor: budget && dial > 1 ? t.accent : t.onInk }]}>
-              <Text style={[styles.pillText, { color: t.ink }]}>{dialTag.toUpperCase()}</Text>
+        <PressScale onPress={() => router.push("/insights")} accessibilityLabel="Open insights">
+          <Card tone="ink" style={styles.hero}>
+            <View style={styles.heroTop}>
+              <Text style={[styles.tag, { color: t.inkMuted }]}>{`SPENT · ${monthName.toUpperCase()}`}</Text>
+              <View style={[styles.pill, { backgroundColor: behind ? t.accent : t.onInk }]}>
+                <Text style={[styles.pillText, { color: t.ink }]}>{tag.toUpperCase()}</Text>
+              </View>
             </View>
-          </View>
-          <View style={{ alignItems: "center" }}>
-            <Gauge value={dial} size={230}>
-              <Text style={[styles.heroTotal, { color: t.onInk }]} adjustsFontSizeToFit numberOfLines={1}>
-                {formatInr(Math.round(total))}
+            <View style={{ alignItems: "center" }}>
+              <Gauge value={share ?? today.getDate() / daysInMonth} size={230}>
+                <Text style={[styles.heroTotal, { color: t.onInk }]} adjustsFontSizeToFit numberOfLines={1}>
+                  {formatInr(Math.round(total))}
+                </Text>
+                <Text style={{ color: t.inkMuted, fontSize: 13, marginTop: 2, textAlign: "center" }}>
+                  {summary.income_minor ? `of ${formatInr(summary.income_minor)} salary` : earned ? `of ${formatInr(earned)} received` : `${summary.transaction_count} payments`}
+                </Text>
+              </Gauge>
+            </View>
+            <View style={styles.heroFoot}>
+              <Text style={{ color: t.inkMuted, fontSize: 13 }}>
+                {summary.saved_minor > 0 ? `${formatInr(summary.saved_minor)} saved` : !summary.income_minor ? "Add your salary in Settings" : " "}
               </Text>
-              <Text style={{ color: t.inkMuted, fontSize: 13, marginTop: 2 }}>
-                {summary.transaction_count} payment{summary.transaction_count === 1 ? "" : "s"}
-              </Text>
-            </Gauge>
-          </View>
-          {budget !== null && (
-            <Text style={{ color: t.inkMuted, fontSize: 13, textAlign: "center", marginTop: -8 }}>
-              {summary.net_spent_minor > budget
-                ? `${formatInr(summary.net_spent_minor - budget)} over your ${formatInr(budget)} budget`
-                : `${formatInr(budget - summary.net_spent_minor)} left of ${formatInr(budget)}`}
-            </Text>
-          )}
-        </Card>
+              <Text style={[styles.tag, { color: t.onInk }]}>INSIGHTS →</Text>
+            </View>
+          </Card>
+        </PressScale>
       </Reveal>
 
-      <View style={styles.pair}>
-        <Reveal index={1} style={{ flex: 1 }}>
-          <Card tone="vista" style={styles.small}>
-            <Text style={[styles.tag, { color: t.text }]}>RECEIVED</Text>
-            <Text style={[styles.smallValue, { color: t.text }]} adjustsFontSizeToFit numberOfLines={1}>{formatInr(summary.received_minor)}</Text>
-            {summary.refunds_minor > 0 && <Text style={{ color: t.text, fontSize: 12 }}>+ {formatInr(summary.refunds_minor)} refunds</Text>}
-          </Card>
-        </Reveal>
-        <Reveal index={2} style={{ flex: 1 }}>
-          <Card style={styles.small}>
-            <Text style={[styles.tag, { color: t.muted }]}>7 DAYS</Text>
-            <MiniBars values={week.values} labels={week.labels} height={34} />
-          </Card>
-        </Reveal>
-      </View>
-
       {summary.review_count > 0 && (
-        <Reveal index={3}>
+        <Reveal index={1}>
           <PressScale onPress={() => router.navigate("/review")} accessibilityLabel="Open review">
             <Card tone="accent" style={styles.review}>
               <Text style={[styles.reviewCount, { color: t.onAccent }]}>{summary.review_count}</Text>
@@ -199,60 +182,8 @@ function SummaryBento({ summary, txns, t }: { summary: Summary; txns: Transactio
           </PressScale>
         </Reveal>
       )}
-
-      {summary.by_category.length > 0 && (
-        <Reveal index={4}>
-          <Card style={{ gap: 14 }}>
-            <PixelLabel right={monthName.slice(0, 3)} style={{ marginBottom: 0 }}>Where it went</PixelLabel>
-            {summary.by_category.slice(0, 6).map((c, i) => {
-              const cat = category(c.category);
-              return (
-                <View key={c.category ?? "none"} style={{ gap: 6 }}>
-                  <View style={styles.catRow}>
-                    <View style={styles.catName}>
-                      <PixelIcon name={cat?.icon ?? "warning-diamond"} size={16} color={t.text} />
-                      <Text style={{ color: t.text, fontSize: 14 }}>{categoryLabel(c.category)}</Text>
-                    </View>
-                    <Text style={[styles.catAmount, { color: t.text }]}>{formatInr(c.spent_minor)}</Text>
-                  </View>
-                  <Meter value={c.spent_minor / maxCat} height={6} delay={200 + i * 80} color={i === 0 || !cat ? t.accent : t.text} />
-                </View>
-              );
-            })}
-            {summary.by_bank.length > 1 && (
-              <View style={[styles.banks, { borderTopColor: t.border }]}>
-                {summary.by_bank.map((bank) => (
-                  <View key={bank.institution_name} style={styles.catRow}>
-                    <Text style={{ color: t.muted, fontSize: 13 }}>{bank.institution_name}</Text>
-                    <Text style={[styles.catAmount, { color: t.muted, fontSize: 13 }]}>{formatInr(bank.spent_minor)}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-          </Card>
-        </Reveal>
-      )}
     </View>
   );
-}
-
-function groupByDay(txns: Transaction[]) {
-  const fmt = new Intl.DateTimeFormat("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: TZ });
-  const key = new Intl.DateTimeFormat("en-CA", { timeZone: TZ });
-  const today = key.format(new Date());
-  const yesterday = key.format(new Date(Date.now() - 86_400_000));
-  const sections: { title: string; data: Transaction[] }[] = [];
-  let current: string | null = null;
-  for (const txn of txns) {
-    const d = new Date(txn.occurred_at);
-    const k = key.format(d);
-    if (k !== current) {
-      current = k;
-      sections.push({ title: k === today ? "Today" : k === yesterday ? "Yesterday" : fmt.format(d), data: [] });
-    }
-    sections.at(-1)!.data.push(txn);
-  }
-  return sections;
 }
 
 const styles = StyleSheet.create({
@@ -263,6 +194,7 @@ const styles = StyleSheet.create({
   bento: { padding: 16, gap: 12 },
   hero: { padding: 20, gap: 4 },
   heroTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  heroFoot: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: -6 },
   heroTotal: { fontFamily: FONT.display, fontSize: 34, maxWidth: 170, textAlign: "center" },
   tag: { fontFamily: FONT.pixel, fontSize: 10, letterSpacing: 1.6 },
   pill: { borderRadius: RADIUS.pill, paddingHorizontal: 10, paddingVertical: 4 },
@@ -278,5 +210,6 @@ const styles = StyleSheet.create({
   catName: { flexDirection: "row", alignItems: "center", gap: 8 },
   catAmount: { fontSize: 14, fontWeight: "600", fontVariant: ["tabular-nums"] },
   banks: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 12, gap: 6 },
+  seeAll: { marginHorizontal: 16, marginTop: 20 },
   day: { fontFamily: FONT.pixel, fontSize: 10, letterSpacing: 2, marginTop: 18, marginBottom: 10, marginHorizontal: 22, textTransform: "uppercase" },
 });

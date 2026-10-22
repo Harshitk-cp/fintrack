@@ -12,7 +12,11 @@ import { classifyBackfill } from "./ledger.ts";
 import { ClaudeExtractor, DEFAULT_LLM_MODEL, groundExtraction } from "./llm.ts";
 import { Notifier, NtfyPush } from "./notify.ts";
 import { parseSms } from "./sms/parser.ts";
+import { FcmSender, loadServiceAccount } from "./fcm.ts";
 import { MailPoller } from "./mail/poller.ts";
+import { ClaudePayeeNamer, NamingWorker, repairProseNames } from "./naming.ts";
+import { ClaudeCoach } from "./coach.ts";
+import { ClaudeSipReader, SipWorker } from "./sips.ts";
 import { ImapMailSource } from "./mail/source.ts";
 import { LlmWorker } from "./worker.ts";
 
@@ -71,23 +75,34 @@ async function main(argv: string[]) {
       const classified = await classifyBackfill(sql);
       if (classified) console.log(`categorised ${classified} existing transactions`);
       const sealer = new Sealer(cfg.dataKey);
+      const repaired = await repairProseNames(sql, sealer, cfg.timeZone);
+      if (repaired) console.log(`repaired ${repaired} payee names misread by an older parser`);
       let worker: LlmWorker | null = null;
       const notifier = new Notifier(sql, cfg.pushUrl ? new NtfyPush(cfg.pushUrl, cfg.pushToken) : null);
+      const serviceAccount = loadServiceAccount(cfg.fcmServiceAccount ?? undefined);
+      if (serviceAccount) notifier.setFcm(new FcmSender(serviceAccount));
       const assistant = cfg.llmModel ? new ClaudeAssistant(sql, cfg.llmModel) : null;
       const mailSource = new ImapMailSource();
       const mailPoller = new MailPoller(sql, sealer, cfg.timeZone, mailSource, { onUnrecognized: () => worker?.kick(), onTransaction: () => notifier.kick() });
       const app = await buildApi({
         sql, sealer, timeZone: cfg.timeZone, onUnrecognized: () => worker?.kick(), notifier, assistant, mail: { source: mailSource, poller: mailPoller },
+        fcm: !!serviceAccount,
       });
       notifier.setLogger(app.log);
+      app.log.info(serviceAccount ? { project: serviceAccount.project_id } : {}, serviceAccount ? "android push (fcm) enabled" : "FINTRACK_FCM_SERVICE_ACCOUNT not set: no android push");
       notifier.start();
       mailPoller.setLogger(app.log);
       mailPoller.start();
       if (cfg.llmModel) {
         worker = new LlmWorker(sql, sealer, new ClaudeExtractor(cfg.llmModel), cfg.timeZone, app.log);
         worker.start();
-        app.log.info({ model: cfg.llmModel }, "llm fallback enabled");
+        new NamingWorker(sql, sealer, new ClaudePayeeNamer(cfg.llmModel), app.log).start();
+        notifier.setCoach(new ClaudeCoach(cfg.llmModel));
+        new SipWorker(sql, sealer, new ClaudeSipReader(cfg.llmModel), cfg.timeZone, app.log).start();
+        app.log.info({ model: cfg.llmModel }, "llm fallback and payee naming enabled");
       } else {
+        // Without a model, SIP mentions go straight to the user.
+        new SipWorker(sql, sealer, null, cfg.timeZone, app.log).start();
         app.log.warn("ANTHROPIC_API_KEY not set: unrecognized SMS stay unrecognized and the assistant is off");
       }
       const purge = () => purgeExpiredRaw(sql).catch((err) => app.log.error({ err }, "purge failed"));

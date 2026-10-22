@@ -109,12 +109,17 @@ export class MailPoller {
     void this.#sync(accountId);
   }
 
+  /** Never throws: it runs from a timer, and an unhandled rejection would stop the whole server. */
   async syncDue() {
-    const due = await this.#sql`
-      select id from mail_accounts
-      where status <> 'auth_failed'
-        and (last_checked_at is null or last_checked_at < now() - ${`${Math.round(this.#interval / 1000)} seconds`}::interval)`;
-    for (const a of due) await this.#sync(a.id);
+    try {
+      const due = await this.#sql`
+        select id from mail_accounts
+        where status <> 'auth_failed'
+          and (last_checked_at is null or last_checked_at < now() - ${`${Math.round(this.#interval / 1000)} seconds`}::interval)`;
+      for (const a of due) await this.#sync(a.id);
+    } catch (err) {
+      this.#log?.warn({ err: err instanceof Error ? err.message : String(err) }, "mail sync check failed"); // e.g. database briefly unreachable
+    }
   }
 
   async #sync(accountId: string) {

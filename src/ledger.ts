@@ -9,7 +9,7 @@ import { slugify } from "./sms/parser.ts";
 export const TXN_COLUMNS = (sql: Sql | Tx) => sql`
   t.id, t.amount_minor, t.currency, t.direction, t.event_type, t.status, t.channel, t.source,
   t.occurred_at, t.counterparty, t.counterparty_vpa, t.reference, t.institution, t.institution_name,
-  t.category, t.category_source, t.label, t.note, t.excluded, t.review_reason, t.reviewed_at,
+  t.category, t.category_source, t.label, t.ai_name, t.note, t.excluded, t.review_reason, t.reviewed_at,
   a.kind as account_kind, a.last4,
   (select count(*) from transaction_evidence te where te.transaction_id = t.id)::int as evidence_count`;
 
@@ -30,7 +30,7 @@ export async function listTransactions(sql: Sql, userId: string, o: ListOptions)
     where t.user_id = ${userId} and t.occurred_at < ${o.before ?? new Date("9999-01-01")}
       ${o.review ? sql`and t.review_reason is not null and t.reviewed_at is null` : sql``}
       ${o.category ? sql`and t.category = ${o.category}` : sql``}
-      ${o.q ? sql`and concat_ws(' ', t.label, t.counterparty, t.counterparty_vpa, t.note, t.institution_name) ilike ${"%" + o.q.replace(/[%_\\]/g, "\\$&") + "%"}` : sql``}
+      ${o.q ? sql`and concat_ws(' ', t.label, t.ai_name, t.counterparty, t.counterparty_vpa, t.note, t.institution_name) ilike ${"%" + o.q.replace(/[%_\\]/g, "\\$&") + "%"}` : sql``}
     order by t.occurred_at desc
     limit ${o.limit}`;
   return rows.map(rowOut);

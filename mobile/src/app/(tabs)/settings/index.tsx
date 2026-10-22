@@ -6,6 +6,7 @@ import { Text, TextInput } from "@/components/text";
 import SmsCollector, { type CollectorStatus } from "../../../../modules/sms-collector";
 import { Chip, inputStyle, Row as UiRow, Section as UiSection } from "@/components/ui";
 import { ApiError, changePin, formatInr, getSettings, logout, parseRupees, sendTestPush, updateSettings, type Settings } from "@/lib/api";
+import { enableAndroidPush, type AndroidPushState } from "@/lib/push";
 import { useSession } from "@/lib/session";
 import { TAB_BAR_SPACE, useTheme, type Theme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
@@ -100,12 +101,14 @@ function AlertSettings() {
   const [s, setS] = useState<Settings | null>(null);
   const [threshold, setThreshold] = useState("");
   const [budget, setBudget] = useState("");
+  const [salary, setSalary] = useState("");
   const [status, setStatus] = useState<string | null>(null);
 
   const apply = (x: Settings) => {
     setS(x);
     setThreshold(String(x.alert_min_minor / 100));
     setBudget(x.monthly_budget_minor ? String(x.monthly_budget_minor / 100) : "");
+    setSalary(x.monthly_income_minor ? String(x.monthly_income_minor / 100) : "");
   };
   useEffect(() => {
     if (session) getSettings(session).then(apply).catch(() => setStatus("Couldn't load settings."));
@@ -154,6 +157,22 @@ function AlertSettings() {
           </View>
         </View>
         <View style={styles.inline}>
+          <Text style={[styles.inlineLabel, { color: t.text }]}>Monthly salary ₹</Text>
+          <TextInput
+            style={[inputStyle(t), styles.small]}
+            value={salary}
+            onChangeText={setSalary}
+            placeholder="Not set"
+            placeholderTextColor={t.muted}
+            keyboardType="number-pad"
+            onEndEditing={() => {
+              const minor = salary.trim() ? parseRupees(salary) : null;
+              if (salary.trim() && minor === null) return setSalary(s.monthly_income_minor ? String(s.monthly_income_minor / 100) : "");
+              if (minor !== s.monthly_income_minor) save({ monthly_income_minor: minor }, minor ? "Salary saved. Home shows how much of it you’ve spent." : "Salary removed.");
+            }}
+          />
+        </View>
+        <View style={styles.inline}>
           <Text style={[styles.inlineLabel, { color: t.text }]}>Monthly budget ₹</Text>
           <TextInput
             style={[inputStyle(t), styles.small]}
@@ -171,6 +190,9 @@ function AlertSettings() {
         </View>
       </UiSection>
 
+      {Platform.OS === "android" && s.fcm?.available ? (
+        <AndroidPush onTest={() => session && sendTestPush(session).then(() => setStatus("Test sent. It should arrive within a few seconds."), () => setStatus("Couldn't send the test."))} />
+      ) : (
       <UiSection
         title="Push notifications"
         footer={
@@ -206,8 +228,41 @@ function AlertSettings() {
           </>
         )}
       </UiSection>
+      )}
       {status && <Text style={{ color: t.muted, fontSize: 14, marginTop: -12, marginBottom: 20, marginHorizontal: 4 }}>{status}</Text>}
     </>
+  );
+}
+
+/** Android: native notifications through Firebase, managed by the system's per-app settings. */
+function AndroidPush({ onTest }: { onTest: () => void }) {
+  const t = useTheme();
+  const { session } = useSession();
+  const [state, setState] = useState<AndroidPushState | null>(null);
+  const check = useCallback(async () => {
+    if (session) setState(await enableAndroidPush(session).catch(() => "unregistered" as const));
+  }, [session]);
+  useRefreshOnActive(useCallback(() => void check(), [check]));
+
+  return (
+    <UiSection
+      title="Notifications"
+      footer="Payments, review questions, budget warnings and your daily summary arrive as Android notifications. Each type can be turned off in the system's notification settings."
+    >
+      <UiRow
+        label="On this phone"
+        value={state === "on" ? "On" : state === "denied" ? "Blocked" : state === "unregistered" ? "Couldn't register, retrying" : "…"}
+        warn={state === "denied" || state === "unregistered"}
+      />
+      <View style={styles.chipsRow}>
+        {state === "denied" ? (
+          <Chip label="Open notification settings" onPress={() => void Linking.openSettings()} />
+        ) : (
+          <Chip label="Send test" onPress={onTest} />
+        )}
+      </View>
+      {state === "denied" && <Text style={{ color: t.muted, fontSize: 13 }}>Notifications are blocked for Fintrack. Allow them in settings, then come back.</Text>}
+    </UiSection>
   );
 }
 

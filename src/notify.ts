@@ -1,9 +1,12 @@
 // Alerts: per-transaction alerts, "what was this?" review prompts, the daily
-// digest and budget warnings. Each is stored in the user's in-app inbox and,
-// when the user has turned push on, also sent to their ntfy topic.
+// digest and budget warnings. Each is stored in the user's in-app inbox and
+// pushed to every channel the user has: their ntfy topic (if turned on) and the
+// FCM token of each Android phone they're signed in on.
 import type { FastifyBaseLogger } from "fastify";
 import { randomBytes } from "node:crypto";
 import { categoryName } from "./categories.ts";
+import { paceLevel, plainNote, type Coach, type PaceFacts } from "./coach.ts";
+import type { FcmMessage, FcmResult } from "./fcm.ts";
 import type { Sql } from "./db.ts";
 import { formatInr, localParts } from "./money.ts";
 import { monthEnd, monthStart, netSpend, topCategories } from "./stats.ts";
@@ -42,6 +45,13 @@ export class NtfyPush implements PushSender {
   }
 }
 
+/** What the Notifier needs from FCM (FcmSender, or a fake in tests). */
+export interface FcmLike {
+  send(token: string, m: FcmMessage): Promise<FcmResult>;
+}
+
+const CHANNEL: Record<string, FcmMessage["channel"]> = { transaction: "payments", review: "review", digest: "summary", budget: "budget", insight: "summary" };
+
 export const newPushTopic = () => `fintrack-${randomBytes(18).toString("base64url")}`;
 
 const REVIEW_PROMPT: Record<string, string> = {
@@ -52,7 +62,7 @@ const REVIEW_PROMPT: Record<string, string> = {
 
 interface NewNotification {
   userId: string;
-  kind: "transaction" | "review" | "digest" | "budget";
+  kind: "transaction" | "review" | "digest" | "budget" | "insight";
   title: string;
   body: string;
   transactionId?: string | null;
@@ -68,6 +78,14 @@ async function insert(sql: Sql, n: NewNotification) {
 
 const PUSH_MAX_ATTEMPTS = 3;
 const BUDGET_STEPS = [80, 100] as const;
+
+interface PaceUser {
+  id: string;
+  name: string;
+  time_zone: string;
+  digest_hour: number;
+  monthly_income_minor: string | number;
+}
 
 /** Transactions older than this when they first arrive get no alert. */
 const STALE_ALERT_MS = 6 * 3_600_000;
@@ -161,11 +179,13 @@ export class Notifier {
   async periodic() {
     const sql = this.#sql;
     const now = this.#now();
-    const users = await sql`select id, time_zone, digest_hour, monthly_budget_minor from users`;
+    const users = await sql`select id, name, time_zone, digest_hour, monthly_budget_minor, monthly_income_minor from users`;
     for (const u of users) {
       const local = localParts(now, u.time_zone);
       const month = await netSpend(sql, u.id, u.time_zone, monthStart(local.month), monthEnd(local.month));
       const budget = u.monthly_budget_minor ? Number(u.monthly_budget_minor) : null;
+
+      if (u.monthly_income_minor) await this.#pace(u as unknown as PaceUser, local, month.netMinor);
 
       if (budget) {
         const pct = (month.netMinor / budget) * 100;
@@ -204,30 +224,96 @@ export class Notifier {
     }
   }
 
+  /** Calm salary check-ins: when spending runs ahead of the month, and every Sunday at the digest hour. */
+  async #pace(u: PaceUser, local: ReturnType<typeof localParts>, spentMinor: number) {
+    const sql = this.#sql;
+    const income = Number(u.monthly_income_minor);
+    const [y, m, d] = local.date.split("-").map(Number) as [number, number, number];
+    const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const monthDone = d / daysInMonth;
+    const level = paceLevel(spentMinor / income, monthDone);
+    const sunday = new Date(Date.UTC(y, m - 1, d)).getUTCDay() === 0 && local.hour >= u.digest_hour;
+    const key = level ? `pace:${local.month}:${level}` : sunday ? `weekly:${local.date}` : null;
+    if (!key) return;
+    const [exists] = await sql`select 1 from notifications where user_id = ${u.id} and dedupe_key = ${key}`;
+    if (exists) return;
+
+    const [top] = await topCategories(sql, u.id, u.time_zone, monthStart(local.month), local.date, 1);
+    const [saved] = await sql`
+      select coalesce(sum(t.amount_minor), 0) as total from transactions t
+      where t.user_id = ${u.id} and t.direction = 'debit' and not t.excluded and t.category = 'investments'
+        and to_char(t.occurred_at at time zone ${u.time_zone}, 'YYYY-MM') = ${local.month}`;
+    const facts: PaceFacts = {
+      name: u.name, incomeMinor: income, spentMinor, savedMinor: Number(saved!.total), monthDone, daysLeft: daysInMonth - d,
+      topCategory: top && top.category !== "uncategorized" ? { name: categoryName(top.category) ?? top.category, spentMinor: top.spentMinor } : null,
+      reason: level ? "ahead" : "weekly",
+    };
+    const note = this.#coach ? await this.#coach.write(facts).catch(() => plainNote(facts)) : plainNote(facts);
+    await insert(sql, { userId: u.id, kind: "insight", dedupeKey: key, title: note.title, body: note.body });
+  }
+
+  /** Writes the salary check-ins; without one they use a plain message. */
+  setCoach(coach: Coach | null) {
+    this.#coach = coach;
+  }
+  #coach: Coach | null = null;
+
   /** Sends inbox items to ntfy for users who turned push on. Gives up after a few attempts or an hour. */
+  /** Android push via FCM, when the server has a Firebase service account. */
+  setFcm(fcm: FcmLike | null) {
+    this.#fcm = fcm;
+  }
+  #fcm: FcmLike | null = null;
+
   async deliver() {
-    if (!this.#push) return;
+    if (!this.#push && !this.#fcm) return;
     const sql = this.#sql;
     const pending = await sql`
-      select n.id, n.kind, n.title, n.body, n.transaction_id, u.push_topic
+      select n.id, n.kind, n.title, n.body, n.transaction_id, n.dedupe_key, n.user_id,
+             case when ${!!this.#push} then u.push_topic end as topic,
+             case when ${!!this.#fcm} then array(select token from push_tokens p where p.user_id = n.user_id) else '{}' end as tokens
       from notifications n join users u on u.id = n.user_id
       where n.pushed_at is null and n.push_attempts < ${PUSH_MAX_ATTEMPTS}
-        and n.created_at > now() - interval '1 hour' and u.push_topic is not null
+        and n.created_at > now() - interval '1 hour'
+        and ((${!!this.#push} and u.push_topic is not null) or (${!!this.#fcm} and exists (select 1 from push_tokens p where p.user_id = n.user_id)))
       order by n.created_at limit 50`;
     for (const n of pending) {
-      try {
-        await this.#push.send(n.push_topic, {
-          title: n.title,
-          body: n.body,
-          click: n.transaction_id ? `fintrack://transaction/${n.transaction_id}` : "fintrack://inbox",
-          priority: n.kind === "budget" ? 4 : n.kind === "digest" ? 2 : 3,
-          tags: [n.kind === "review" ? "question" : n.kind === "budget" ? "warning" : n.kind === "digest" ? "bar_chart" : "money_with_wings"],
-        });
-        await sql`update notifications set pushed_at = now(), push_error = null, push_attempts = push_attempts + 1 where id = ${n.id}`;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await sql`update notifications set push_error = ${message.slice(0, 300)}, push_attempts = push_attempts + 1 where id = ${n.id}`;
-        this.#log?.warn({ notification: n.id, err: message }, "push failed");
+      const url = n.transaction_id ? `fintrack://transaction/${n.transaction_id}` : "fintrack://inbox";
+      const errors: string[] = [];
+      let delivered = false;
+      if (n.topic && this.#push) {
+        try {
+          await this.#push.send(n.topic, {
+            title: n.title,
+            body: n.body,
+            click: url,
+            priority: n.kind === "budget" ? 4 : n.kind === "digest" ? 2 : 3,
+            tags: [n.kind === "review" ? "question" : n.kind === "budget" ? "warning" : n.kind === "digest" ? "bar_chart" : "money_with_wings"],
+          });
+          delivered = true;
+        } catch (err) {
+          errors.push(`ntfy: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      for (const token of (n.tokens as string[]) ?? []) {
+        try {
+          const r = await this.#fcm!.send(token, {
+            title: n.title, body: n.body, url, channel: CHANNEL[n.kind] ?? "payments",
+            tag: n.dedupe_key ?? undefined, high: n.kind !== "digest",
+          });
+          if (r === "unregistered") await sql`delete from push_tokens where token = ${token}`; // app uninstalled or token rotated
+          else delivered = true;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push(`fcm: ${message}`);
+          await sql`update push_tokens set last_error = ${message.slice(0, 300)} where token = ${token}`;
+        }
+      }
+      if (delivered) {
+        await sql`update notifications set pushed_at = now(), push_error = ${errors.length ? errors.join("; ").slice(0, 300) : null}, push_attempts = push_attempts + 1 where id = ${n.id}`;
+      } else {
+        await sql`update notifications set push_error = ${(errors.join("; ") || "no target").slice(0, 300)}, push_attempts = push_attempts + 1 where id = ${n.id}`;
+        this.#log?.warn({ notification: n.id, err: errors }, "push failed");
       }
     }
   }

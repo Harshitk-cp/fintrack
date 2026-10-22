@@ -1,7 +1,7 @@
 import * as LocalAuthentication from "expo-local-authentication";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AppState, Platform, StyleSheet, View } from "react-native";
-import Animated, { FadeIn, FadeOut, useAnimatedStyle, useSharedValue, withSequence, withSpring, withTiming } from "react-native-reanimated";
+import Animated, { FadeIn, FadeOut, useAnimatedStyle, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Barcode, CyberBackground, PressScale, Reveal, Wordmark } from "@/components/cyber";
 import { Card } from "@/components/ui";
@@ -9,13 +9,14 @@ import { PixelIcon } from "@/components/pixel-icon";
 import { Text } from "@/components/text";
 import { ApiError, verifyPin } from "./api";
 import { useSession } from "./session";
-import { alpha, FONT, PALETTE, useTheme } from "./theme";
+import { alpha, FONT, MOTION, PALETTE, useTheme } from "./theme";
 
 /**
- * Locks the app on every launch and every time it goes to the background.
- * Unlock with Face ID / Touch ID / fingerprint, or the account PIN (checked by
- * the server, which also enforces the lockout). The cover also hides balances
- * in the app switcher.
+ * Locks the app when it starts fresh (a cold launch after it was closed or
+ * killed), not when it comes back from the background. Unlock with Face ID /
+ * Touch ID / fingerprint, or the account PIN (checked by the server, which also
+ * enforces the lockout). While the app is in the background or the app switcher,
+ * a cover hides balances without locking.
  */
 export function LockGate({ children }: { children: ReactNode }) {
   const { session, loading } = useSession();
@@ -31,11 +32,8 @@ export function LockGate({ children }: { children: ReactNode }) {
   }, [loading, session]);
 
   useEffect(() => {
-    const sub = AppState.addEventListener("change", (state) => {
-      if (state === "background") setLocked(true);
-      // "inactive" is iOS's app-switcher / Control Centre state: hide content without locking.
-      setCovered(state !== "active");
-    });
+    // Background and "inactive" (iOS app switcher, Control Centre) only hide content; they don't lock.
+    const sub = AppState.addEventListener("change", (state) => setCovered(state !== "active"));
     return () => sub.remove();
   }, []);
 
@@ -127,11 +125,9 @@ function LockScreen({ onUnlock }: { onUnlock: () => void }) {
       const code = e instanceof ApiError ? e.code : "unknown";
       // A 401 that isn't a wrong PIN means this phone's token was revoked.
       if (e instanceof ApiError && e.status === 401 && code !== "wrong_pin") return signOut();
-      shake.set(withSequence(
-        withTiming(-12, { duration: 45 }), withTiming(12, { duration: 45 }),
-        withTiming(-8, { duration: 45 }), withTiming(8, { duration: 45 }),
-        withSpring(0, { damping: 8, stiffness: 300 }),
-      ));
+      // A short, soft side-to-side: says "no" without jolting.
+      const step = (x: number) => withTiming(x, { duration: 70, easing: MOTION.inOut });
+      shake.set(withSequence(step(-7), step(6), step(-4), step(2), withTiming(0, { duration: 140, easing: MOTION.ease })));
       setError(
         code === "wrong_pin" ? "WRONG PIN" :
         code === "locked" ? "TOO MANY TRIES. TRY LATER" :
@@ -186,7 +182,7 @@ function LockScreen({ onUnlock }: { onUnlock: () => void }) {
                 <PressScale
                   key={k}
                   onPress={() => press(k)}
-                  scale={0.88}
+                  scale={0.94}
                   accessibilityLabel={k === "del" ? "Delete" : k === "bio" ? `Use ${bio?.label}` : k}
                   style={[
                     styles.keySlot,
@@ -219,9 +215,9 @@ function LockScreen({ onUnlock }: { onUnlock: () => void }) {
 function Dot({ filled, error }: { filled: boolean; error: boolean }) {
   const s = useSharedValue(filled ? 1 : 0);
   useEffect(() => {
-    s.set(withSpring(filled ? 1 : 0, { damping: 10, stiffness: 320 }));
+    s.set(withTiming(filled ? 1 : 0, { duration: MOTION.fast, easing: MOTION.ease }));
   }, [filled, s]);
-  const fill = useAnimatedStyle(() => ({ opacity: s.get(), transform: [{ scale: 0.3 + s.get() * 0.7 }] }));
+  const fill = useAnimatedStyle(() => ({ opacity: s.get(), transform: [{ scale: 0.7 + s.get() * 0.3 }] }));
   return (
     <View style={[styles.dot, { borderColor: error ? PALETTE.orange : alpha(PALETTE.amande, 0.5) }]}>
       <Animated.View style={[styles.dotFill, { backgroundColor: PALETTE.orange }, fill]} />

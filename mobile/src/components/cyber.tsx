@@ -4,14 +4,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, useWindowDimensions, View, type StyleProp, type TextInputProps, type ViewStyle } from "react-native";
 import Animated, {
-  Easing, FadeInDown, interpolate, useAnimatedProps, useAnimatedStyle, useSharedValue, withDelay, withRepeat, withSpring, withTiming,
+  Easing, FadeInDown, interpolate, useAnimatedProps, useAnimatedStyle, useSharedValue, withDelay, withRepeat, withTiming,
 } from "react-native-reanimated";
 import Svg, { Circle, Defs, Path, Pattern, Rect } from "react-native-svg";
-import { alpha, FONT, PALETTE, RADIUS, useTheme } from "@/lib/theme";
+import { alpha, FONT, MOTION, PALETTE, RADIUS, useTheme } from "@/lib/theme";
 import { PixelIcon } from "./pixel-icon";
 import { Text, TextInput } from "./text";
 
-const SPRING = { damping: 16, stiffness: 220, mass: 0.6 };
+const PRESS_IN = { duration: MOTION.fast, easing: MOTION.ease };
+const PRESS_OUT = { duration: MOTION.base, easing: MOTION.ease };
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 /** Full-screen paper: the page colour with a faint dot grid. */
@@ -33,17 +34,17 @@ export function CyberBackground() {
   );
 }
 
-/** Fades and springs its child up into place; `index` staggers siblings. */
+/** Fades its child in while it settles a few pixels upward; `index` staggers siblings. */
 export function Reveal({ index = 0, children, style }: { index?: number; children: ReactNode; style?: StyleProp<ViewStyle> }) {
   return (
-    <Animated.View entering={FadeInDown.springify().damping(17).stiffness(150).delay(50 + index * 70)} style={style}>
+    <Animated.View entering={FadeInDown.duration(MOTION.slow).easing(MOTION.ease).delay(40 + index * 50).withInitialValues({ transform: [{ translateY: 10 }] })} style={style}>
       {children}
     </Animated.View>
   );
 }
 
-/** Pressable that scales down on touch with a spring, like a physical key. */
-export function PressScale({ children, onPress, disabled, style, scale = 0.97, accessibilityLabel }: {
+/** Pressable that eases down slightly on touch. */
+export function PressScale({ children, onPress, disabled, style, scale = 0.98, accessibilityLabel }: {
   children: ReactNode; onPress?: () => void; disabled?: boolean; style?: StyleProp<ViewStyle>; scale?: number; accessibilityLabel?: string;
 }) {
   const s = useSharedValue(1);
@@ -54,8 +55,8 @@ export function PressScale({ children, onPress, disabled, style, scale = 0.97, a
       disabled={disabled}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
-      onPressIn={() => s.set(withSpring(scale, SPRING))}
-      onPressOut={() => s.set(withSpring(1, SPRING))}
+      onPressIn={() => s.set(withTiming(scale, PRESS_IN))}
+      onPressOut={() => s.set(withTiming(1, PRESS_OUT))}
     >
       <Animated.View style={[style, a]}>{children}</Animated.View>
     </Pressable>
@@ -74,8 +75,8 @@ export function CyberButton({ title, onPress, kind = "primary", busy, disabled, 
   const t = useTheme();
   const press = useSharedValue(0);
   const off = disabled || busy;
-  const a = useAnimatedStyle(() => ({ transform: [{ scale: 1 - press.get() * 0.035 }] }));
-  const disc = useAnimatedStyle(() => ({ transform: [{ translateX: press.get() * 4 }] }));
+  const a = useAnimatedStyle(() => ({ transform: [{ scale: 1 - press.get() * 0.02 }] }));
+  const disc = useAnimatedStyle(() => ({ transform: [{ translateX: press.get() * 3 }] }));
   const solid = kind === "solid";
   const label = solid ? t.onInk : t.text;
 
@@ -86,8 +87,8 @@ export function CyberButton({ title, onPress, kind = "primary", busy, disabled, 
       accessibilityRole="button"
       accessibilityLabel={title}
       accessibilityState={{ disabled: !!off, busy: !!busy }}
-      onPressIn={() => press.set(withSpring(1, SPRING))}
-      onPressOut={() => press.set(withSpring(0, SPRING))}
+      onPressIn={() => press.set(withTiming(1, PRESS_IN))}
+      onPressOut={() => press.set(withTiming(0, PRESS_OUT))}
       style={style}
     >
       <Animated.View
@@ -136,7 +137,7 @@ export function CyberField({ label, style, onFocus, onBlur, ...input }: TextInpu
           placeholderTextColor={alpha(PALETTE.oxford, 0.32)}
           {...input}
           onFocus={(e) => {
-            focus.set(withSpring(1, SPRING));
+            focus.set(withTiming(1, { duration: MOTION.fast, easing: MOTION.ease }));
             onFocus?.(e);
           }}
           onBlur={(e) => {
@@ -151,15 +152,15 @@ export function CyberField({ label, style, onFocus, onBlur, ...input }: TextInpu
   );
 }
 
-/** "FINTRACK" in Unbounded with the two-rings-and-a-dot mark. The dot pulses gently. */
+/** "FINTRACK" in Unbounded with the two-rings-and-a-dot mark. The dot breathes slowly. */
 export function Wordmark({ size = 34, style, color }: { size?: number; style?: StyleProp<ViewStyle>; color?: string }) {
   const t = useTheme();
   const ink = color ?? t.text;
   const pulse = useSharedValue(0);
   useEffect(() => {
-    pulse.set(withRepeat(withTiming(1, { duration: 1600, easing: Easing.inOut(Easing.sin) }), -1, true));
+    pulse.set(withRepeat(withTiming(1, { duration: 2600, easing: Easing.inOut(Easing.sin) }), -1, true));
   }, [pulse]);
-  const dot = useAnimatedStyle(() => ({ transform: [{ scale: interpolate(pulse.get(), [0, 1], [0.86, 1]) }] }));
+  const dot = useAnimatedStyle(() => ({ opacity: interpolate(pulse.get(), [0, 1], [0.75, 1]) }));
   const r = size * 0.36;
   return (
     <View style={[styles.wordmarkRow, style]} accessibilityRole="header" accessibilityLabel="Fintrack">
@@ -171,6 +172,31 @@ export function Wordmark({ size = 34, style, color }: { size?: number; style?: S
       </View>
     </View>
   );
+}
+
+/** Three pixel squares that brighten in turn: the assistant is thinking. */
+export function ThinkingDots({ color }: { color?: string }) {
+  const t = useTheme();
+  const v = useSharedValue(0);
+  useEffect(() => {
+    v.set(withRepeat(withTiming(1, { duration: 1400, easing: Easing.linear }), -1));
+  }, [v]);
+  return (
+    <View style={{ flexDirection: "row", gap: 6, paddingVertical: 6 }} accessibilityLabel="Thinking">
+      {[0, 1, 2].map((i) => (
+        <ThinkingDot key={i} v={v} offset={i / 3} color={color ?? t.text} />
+      ))}
+    </View>
+  );
+}
+
+function ThinkingDot({ v, offset, color }: { v: ReturnType<typeof useSharedValue<number>>; offset: number; color: string }) {
+  const style = useAnimatedStyle(() => {
+    // A soft wave: each square peaks a third of a cycle after the previous one.
+    const phase = (v.get() - offset + 1) % 1;
+    return { opacity: 0.25 + 0.75 * Math.max(0, Math.sin(phase * Math.PI)) };
+  });
+  return <Animated.View style={[{ width: 7, height: 7, backgroundColor: color }, style]} />;
 }
 
 /** Small uppercase pixel label, used for field and section titles. */
@@ -252,7 +278,7 @@ export function Meter({ value, color, track, height = 8, delay = 0 }: { value: n
   const [w, setW] = useState(0);
   const v = useSharedValue(0);
   useEffect(() => {
-    v.set(withDelay(delay, withSpring(Math.max(0, Math.min(value, 1)), { damping: 18, stiffness: 90 })));
+    v.set(withDelay(delay, withTiming(Math.max(0, Math.min(value, 1)), { duration: 900, easing: MOTION.ease })));
   }, [value, delay, v]);
   const fill = useAnimatedStyle(() => ({ width: v.get() * w }));
   const seg = height + 2;
@@ -290,7 +316,7 @@ export function Gauge({ value, size = 220, color, track, children }: { value: nu
   const length = (Math.PI * 2 * r * sweep) / 360;
   const v = useSharedValue(0);
   useEffect(() => {
-    v.set(withDelay(200, withTiming(Math.max(0, Math.min(value, 1)), { duration: 1100, easing: Easing.out(Easing.cubic) })));
+    v.set(withDelay(200, withTiming(Math.max(0, Math.min(value, 1)), { duration: 1200, easing: MOTION.ease })));
   }, [value, v]);
   const props = useAnimatedProps(() => ({ strokeDashoffset: length * (1 - v.get()) }));
   const ticks = Array.from({ length: 10 }, (_, i) => point(start + (sweep / 9) * i, r + 13));

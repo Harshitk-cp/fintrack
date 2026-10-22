@@ -3,8 +3,9 @@ import { Linking, StyleSheet, View } from "react-native";
 import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 import { ApiError, connectMail, disconnectMail, getMail, syncMail, type Mailbox, type MailState } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
+import { useBadges } from "@/lib/badges";
 import { useSession } from "@/lib/session";
-import { alpha, PALETTE, RADIUS, useTheme } from "@/lib/theme";
+import { alpha, MOTION, PALETTE, RADIUS, useTheme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
 import { CyberButton, CyberField, PixelLabel } from "./cyber";
 import { PixelIcon } from "./pixel-icon";
@@ -34,6 +35,7 @@ export function MailSettings() {
   const { session } = useSession();
   const [mail, setMail] = useState<MailState | null>(null);
   const [adding, setAdding] = useState<{ address: string } | null>(null);
+  const badges = useBadges();
 
   const load = useCallback(async () => {
     if (!session) return;
@@ -49,7 +51,7 @@ export function MailSettings() {
   return (
     <View style={styles.section}>
       <PixelLabel right={boxes.length ? `${boxes.length}/${mail.max}` : undefined}>Bank emails</PixelLabel>
-      <Animated.View layout={LinearTransition.springify().damping(18)} style={{ gap: 10 }}>
+      <Animated.View layout={LinearTransition.duration(MOTION.base).easing(MOTION.ease)} style={{ gap: 10 }}>
         {boxes.map((m) => (
           <Animated.View key={m.id} entering={FadeIn} exiting={FadeOut}>
             <MailboxCard
@@ -64,6 +66,7 @@ export function MailSettings() {
                 if (!session) return;
                 await disconnectMail(session, m.id).catch(() => {});
                 setMail({ ...mail, mailboxes: boxes.filter((x) => x.id !== m.id) });
+                badges.refresh(); // removing the last one brings the Settings dot back
               }}
             />
           </Animated.View>
@@ -79,6 +82,7 @@ export function MailSettings() {
               onAdded={(m) => {
                 setMail(m);
                 setAdding(null);
+                badges.refresh(); // clears the Settings dot and the Home banner
                 // The first check runs on the server right away; show its result in a moment.
                 setTimeout(() => void load(), 4000);
               }}

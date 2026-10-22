@@ -192,7 +192,7 @@ export default function TransactionScreen() {
         <Section title="Details">
           <Row label="Bank" value={txn.institution_name ?? "Unknown"} />
           {txn.counterparty_vpa && <Row label="UPI ID" value={txn.counterparty_vpa} />}
-          {txn.counterparty && txn.label && <Row label="From the bank" value={txn.counterparty} />}
+          {txn.counterparty && (txn.label || txn.ai_name) && <Row label="From the bank" value={txn.counterparty} />}
           {txn.reference && <Row label="Reference" value={txn.reference} />}
           <Row
             label="Source"

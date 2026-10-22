@@ -3,8 +3,9 @@ import type { Transaction } from "./api";
 export const TZ = "Asia/Kolkata";
 
 /** The user's label, else the merchant/person from the SMS, else the UPI ID. */
-export function payeeName(t: Pick<Transaction, "label" | "counterparty" | "counterparty_vpa" | "direction">): string {
+export function payeeName(t: Pick<Transaction, "label" | "ai_name" | "counterparty" | "counterparty_vpa" | "direction">): string {
   if (t.label) return t.label;
+  if (t.ai_name) return t.ai_name;
   const name = t.counterparty?.replace(/^\*+/, "").trim();
   if (name) return name;
   if (t.counterparty_vpa) return t.counterparty_vpa;

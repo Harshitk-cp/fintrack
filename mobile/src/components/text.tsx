@@ -20,5 +20,5 @@ export function Text({ style, ...rest }: TextProps) {
 export function TextInput({ style, ...rest }: ComponentProps<typeof RNTextInput>) {
   const t = useTheme();
   const flat = StyleSheet.flatten(style) ?? {};
-  return <RNTextInput selectionColor={t.accent} keyboardAppearance="dark" {...rest} style={[style, face(flat)]} />;
+  return <RNTextInput selectionColor={t.accent} keyboardAppearance="light" {...rest} style={[style, face(flat)]} />;
 }

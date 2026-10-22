@@ -2,8 +2,8 @@ import { router } from "expo-router";
 import { useCallback, useState } from "react";
 import { FlatList, Pressable, RefreshControl, StyleSheet, View } from "react-native";
 import { Text, TextInput } from "@/components/text";
-import { Chip, Empty, inputStyle } from "@/components/ui";
-import { formatInr, getTransactions, updateTransaction, type Transaction, type TransactionPatch } from "@/lib/api";
+import { Chip, Empty, IconTile, inputStyle } from "@/components/ui";
+import { dismissSipSuggestion, formatInr, getSips, getTransactions, updateTransaction, type SipSuggestion, type Transaction, type TransactionPatch } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
 import { CATEGORIES } from "@/lib/categories";
 import { formatDateTime, payeeName, REVIEW_PROMPT } from "@/lib/format";
@@ -19,13 +19,15 @@ export default function ReviewScreen() {
   const { session } = useSession();
   const badges = useBadges();
   const [items, setItems] = useState<Transaction[] | null>(null);
+  const [sipAlerts, setSipAlerts] = useState<SipSuggestion[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!session) return;
-    const r = await getTransactions(session, { review: true, limit: 200 }).catch(() => null);
+    const [r, s] = await Promise.all([getTransactions(session, { review: true, limit: 200 }).catch(() => null), getSips(session).catch(() => null)]);
     if (r) setItems(r.transactions);
+    if (s) setSipAlerts(s.suggestions);
   }, [session]);
   useRefreshOnActive(useCallback(() => void load(), [load]));
 
@@ -61,17 +63,31 @@ export default function ReviewScreen() {
               await load();
               setRefreshing(false);
             }}
-            tintColor={t.muted}
+            tintColor={t.accent}
+            colors={[t.accent]}
           />
         }
         ListHeaderComponent={
-          items?.length ? (
-            <Text style={{ color: t.muted, fontSize: 14, lineHeight: 20 }}>
-              Your answer is remembered for the payee, so future payments to them are filled in automatically.
-            </Text>
-          ) : undefined
+          <View style={{ gap: 16 }}>
+            {sipAlerts.map((g) => (
+              <SipAlertCard
+                key={g.id}
+                alert={g}
+                onDismiss={async () => {
+                  setSipAlerts((cur) => cur.filter((x) => x.id !== g.id));
+                  if (session) await dismissSipSuggestion(session, g.id).catch(() => {});
+                  badges.refresh();
+                }}
+              />
+            ))}
+            {items?.length ? (
+              <Text style={{ color: t.muted, fontSize: 14, lineHeight: 20 }}>
+                Your answer is remembered for the payee, so future payments to them are filled in automatically.
+              </Text>
+            ) : null}
+          </View>
         }
-        ListEmptyComponent={items ? <Empty title="All caught up ✓" body="Payments we can't work out on our own will show up here." /> : undefined}
+        ListEmptyComponent={items && !sipAlerts.length ? <Empty title="All caught up ✓" body="Payments we can't work out on our own will show up here." /> : undefined}
         renderItem={({ item }) => <ReviewCard txn={item} onAnswer={answer} />}
       />
       {toast && (
@@ -79,6 +95,38 @@ export default function ReviewScreen() {
           <Text style={{ color: t.bg, fontSize: 14 }}>{toast}</Text>
         </View>
       )}
+    </View>
+  );
+}
+
+/** An alert that mentioned a SIP the assistant couldn't pin down. */
+function SipAlertCard({ alert, onDismiss }: { alert: SipSuggestion; onDismiss: () => void }) {
+  const t = useTheme();
+  return (
+    <View style={[styles.card, { backgroundColor: t.card, borderColor: t.border }]}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <IconTile name="trending-up" hot />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontSize: 17, fontWeight: "600" }}>Looks like a SIP</Text>
+          <Text style={{ color: t.muted, fontSize: 13, marginTop: 2 }}>
+            {[alert.scheme, alert.amount_minor ? formatInr(alert.amount_minor) : null, formatDateTime(alert.seen_at)].filter(Boolean).join(" · ")}
+          </Text>
+        </View>
+      </View>
+      <Text style={{ color: t.text, fontSize: 15, fontWeight: "600" }}>Which fund is it, and how much each month?</Text>
+      <View style={[styles.actions, { borderTopColor: t.border }]}>
+        <Text
+          style={[styles.action, { color: t.link }]}
+          onPress={() =>
+            router.push({ pathname: "/sip", params: { suggestion: alert.id, scheme: alert.scheme ?? "", ...(alert.amount_minor ? { amount: String(alert.amount_minor) } : {}) } })
+          }
+        >
+          Add as SIP
+        </Text>
+        <Text style={[styles.action, { color: t.muted }]} onPress={onDismiss}>
+          Not a SIP
+        </Text>
+      </View>
     </View>
   );
 }

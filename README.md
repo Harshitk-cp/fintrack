@@ -59,6 +59,8 @@ Every 5 minutes (and right after connecting, or on **Sync**) the server reads IN
 
 An SMS and an email about the same payment become **one** transaction: they join on the UPI/bank reference, or, when one of them has none, on same bank + amount + direction within 15 minutes (36 hours if the message has only a date) as long as that transaction doesn't already have a message from the same source. The second message fills in what the first left out (reference, UPI ID, payee, account). Two SMS for identical purchases never merge.
 
+Until a mailbox is connected, the Settings tab shows a dot, and Home shows a banner asking to connect one. Dismissing the banner brings it back after 1 day, then after 7 days, then never (the count is kept per user on the server); the dot stays until a mailbox is added.
+
 Payments that arrive more than 6 hours after they happened (a first mailbox sync, an SMS backlog) don't trigger alerts; they still appear in the app and the review queue.
 
 ## Assistant
@@ -113,7 +115,7 @@ The Expo app runs on iOS and Android. It has four tabs:
 pnpm -s fintrack user set-pin --phone 9876543210 --pin 4821
 ```
 
-**App lock.** The app locks every time it opens or returns from the background. Face ID, Touch ID or the fingerprint unlocks it, and the account PIN is the fallback. The lock screen also hides balances in the app switcher.
+**App lock.** The app locks when it starts fresh (after being closed), not when you switch back to it from another app. Face ID, Touch ID or the fingerprint unlocks it, and the account PIN is the fallback. The lock screen also hides balances in the app switcher.
 
 Pairing codes (`fintrack pair --user <id> …`) still work through the API, for scripts and collectors, but the app signs in with phone and PIN.
 

@@ -55,3 +55,10 @@ export function builtinCategory(...texts: (string | null | undefined)[]): Catego
   for (const [cat, words] of KEYWORDS) if (words.some((w) => hay.includes(w))) return cat;
   return null;
 }
+
+/** The needs / wants / savings split used by Insights. Uncategorised spending is shown on its own. */
+export const BUCKET: Record<string, "needs" | "wants" | "savings"> = {
+  rent: "needs", bills: "needs", groceries: "needs", health: "needs", transport: "needs", fuel: "needs", education: "needs", family: "needs",
+  food: "wants", shopping: "wants", entertainment: "wants", travel: "wants", personal: "wants", gifts: "wants", subscriptions: "wants", other: "wants",
+  investments: "savings",
+};

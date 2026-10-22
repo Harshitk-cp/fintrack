@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "react-native";
+import { FlatList, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "react-native";
 import { Text, TextInput } from "@/components/text";
 import { Chip } from "@/components/ui";
 import { ApiError, ask, type ChatMessage } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { tabBarTop, useTheme } from "@/lib/theme";
+import { MOTION, tabBarTop, useTheme } from "@/lib/theme";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { PixelIcon } from "@/components/pixel-icon";
-import Animated, { FadeInDown, FadeInRight } from "react-native-reanimated";
+import Animated, { FadeIn, FadeInDown } from "react-native-reanimated";
+import { ThinkingDots } from "@/components/cyber";
 
 const SUGGESTIONS = [
   "How much have I spent this month?",
@@ -97,7 +98,9 @@ export default function AskScreen() {
         renderItem={({ item }) => {
           const mine = item.role === "user";
           return (
-            <Animated.View entering={mine ? FadeInRight.springify().damping(18) : FadeInDown.springify().damping(18)} style={[styles.bubble, mine ? [styles.mine, { backgroundColor: t.ink }] : [styles.theirs, { backgroundColor: t.card, borderColor: t.border }]]}>
+            <Animated.View
+              entering={(mine ? FadeIn.duration(MOTION.base) : FadeInDown.duration(MOTION.slow).withInitialValues({ transform: [{ translateY: 8 }] })).easing(MOTION.ease)}
+              style={[styles.bubble, mine ? [styles.mine, { backgroundColor: t.ink }] : [styles.theirs, { backgroundColor: t.card, borderColor: t.border }]]}>
               <Text style={{ color: mine ? t.onInk : t.text, fontSize: 15, lineHeight: 21, fontWeight: mine ? "600" : "400" }} selectable>
                 {mine ? item.content : withBold(item.content)}
               </Text>
@@ -106,7 +109,11 @@ export default function AskScreen() {
         }}
         ListFooterComponent={
           <View>
-            {busy && <ActivityIndicator style={{ alignSelf: "flex-start", margin: 8 }} color={t.muted} />}
+            {busy && (
+              <Animated.View entering={FadeIn.duration(MOTION.base).easing(MOTION.ease)} style={[styles.bubble, styles.theirs, { backgroundColor: t.card, borderColor: t.border }]}>
+                <ThinkingDots color={t.muted} />
+              </Animated.View>
+            )}
             {error && <Text style={{ color: t.dangerText, fontSize: 14 }}>{error}</Text>}
           </View>
         }

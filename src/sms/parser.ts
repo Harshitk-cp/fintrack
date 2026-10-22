@@ -141,6 +141,14 @@ const COUNTERPARTY_DEBIT = new RegExp(String.raw`\b(?:to|at|towards)\s+(?:vpa\s+
 const COUNTERPARTY_CREDIT = new RegExp(String.raw`\b(?:from|by)\s+(?:vpa\s+)?(.+?)` + CP_END, "gi");
 // Bank names/accounts, and bare phone numbers (helplines like "SMS BLOCK 789 to 9215676766").
 const NOT_COUNTERPARTY = /\b(a\/c|acct|account|card|bank|your)\b|^x+\d+|^\+?\d[\d\s-]{6,}$/i;
+// Sentence fragments, not names: "We wish to inform you that Rs. 3283 …" must not make "inform you that Rs" a payee,
+// and "… on 12 Oct at 06:13:10" must not make a time one.
+const PROSE = /\b(you|we|that|this|inform|informed|wish|has|have|been|is|are|was|our|please|kindly)\b|(?:^|\s)(rs\.?|inr|₹)(?:\s|$)|^[\d:.\s/-]+$/i;
+
+/** True when a stored payee name is really a parsing mistake (used to repair old rows). */
+export function looksLikeProse(name: string): boolean {
+  return PROSE.test(name);
+}
 
 /** Lets the API refuse authentication messages before anything is stored. */
 export function looksLikeOtp(body: string): boolean {
@@ -254,7 +262,7 @@ function findCounterparty(text: string, direction: Direction): string | null {
     // "to VPA swiggy@icici SWIGGY": the UPI ID is kept separately, so the payee is the name after it.
     const named = /^\S+@\S+\s+(.+)$/.exec(c);
     if (named) c = named[1]!.trim();
-    if (c && c.length <= 80 && !NOT_COUNTERPARTY.test(c)) return c;
+    if (c && c.length <= 80 && !NOT_COUNTERPARTY.test(c) && !PROSE.test(c)) return c;
   }
   return null;
 }

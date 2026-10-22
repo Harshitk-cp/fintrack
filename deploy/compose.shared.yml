@@ -42,6 +42,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       FINTRACK_PUSH_URL: ${FINTRACK_PUSH_URL:-https://ntfy.sh}
       FINTRACK_PUSH_TOKEN: ${FINTRACK_PUSH_TOKEN:-}
+      # Firebase service account key, base64-encoded, for Android push (optional).
+      FINTRACK_FCM_SERVICE_ACCOUNT: ${FINTRACK_FCM_SERVICE_ACCOUNT:-}
       NODE_OPTIONS: --max-old-space-size=128
     networks:
       default: {}

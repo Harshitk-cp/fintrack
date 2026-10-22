@@ -1,3 +1,5 @@
+import { Easing } from "react-native-reanimated";
+
 // A light, pastel palette built from exactly four colours. Every other shade is
 // one of them with transparency, or two of them mixed. Amande is the paper,
 // Oxford the ink, Orange the one loud colour (fills, icons, outlines; never
@@ -62,6 +64,18 @@ export const FONT = {
 } as const;
 
 export const RADIUS = { card: 24, field: 14, pill: 999, tile: 12 } as const;
+
+/**
+ * One easing for all motion: a long, soft ease-out (like motion.dev's defaults).
+ * No springs or bounces anywhere; things settle, they don't pop.
+ */
+export const MOTION = {
+  ease: Easing.bezier(0.22, 1, 0.36, 1),
+  inOut: Easing.bezier(0.65, 0, 0.35, 1),
+  fast: 180,
+  base: 320,
+  slow: 560,
+} as const;
 
 /** The floating tab bar: a fixed height, and its distance from the bottom edge. */
 export const TAB_BAR_HEIGHT = 76;

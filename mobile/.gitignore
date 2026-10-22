@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Firebase client config: not secret, but no reason to publish it
+google-services.json

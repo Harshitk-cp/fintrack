@@ -49,7 +49,7 @@ export function Chip({ label, selected, onPress, disabled, icon }: { label: stri
     <PressScale
       onPress={onPress}
       disabled={disabled}
-      scale={0.94}
+      scale={0.97}
       accessibilityLabel={label}
       style={[styles.chip, { borderColor: selected ? t.ink : t.border, backgroundColor: selected ? t.ink : t.card, opacity: disabled ? 0.5 : 1 }]}
     >
@@ -79,7 +79,7 @@ export function Button({
 export function HeaderButton({ label, icon, onPress, badge }: { label: string; icon: PixelIconName; onPress: () => void; badge?: number }) {
   const t = useTheme();
   return (
-    <PressScale onPress={onPress} scale={0.9} accessibilityLabel={badge ? `${label}, ${badge} new` : label} style={[styles.headerButton, { borderColor: t.border, backgroundColor: t.card }]}>
+    <PressScale onPress={onPress} scale={0.95} accessibilityLabel={badge ? `${label}, ${badge} new` : label} style={[styles.headerButton, { borderColor: t.border, backgroundColor: t.card }]}>
       <PixelIcon name={icon} size={22} color={t.text} />
       {!!badge && <Badge count={badge} style={styles.headerBadge} />}
     </PressScale>

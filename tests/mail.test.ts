@@ -6,7 +6,7 @@ import { newDataKey, newDeviceToken, Sealer } from "../src/crypto.ts";
 import { connect, migrate } from "../src/db.ts";
 import { ingestSms } from "../src/ingest.ts";
 import { alertText, htmlToText, imapServerFor, isBankSender, looksLikeTransactionSubject, parseEmail } from "../src/mail/filter.ts";
-import { syncMailbox } from "../src/mail/poller.ts";
+import { MailPoller, syncMailbox } from "../src/mail/poller.ts";
 import { ImapMailSource, MailAuthError, MailHostError, resolvePublicHost, type MailBatch, type MailCredentials, type MailCursor, type MailSource } from "../src/mail/source.ts";
 import { Notifier } from "../src/notify.ts";
 import { parseSms } from "../src/sms/parser.ts";
@@ -94,6 +94,12 @@ describe("email phrasing the rule parser understands", () => {
     expect(parseSms("alerts@hdfcbank.net", text, new Date("2026-10-21T13:00:00Z"), TZ)).toMatchObject({
       kind: "transaction", parser: "hdfc/v1", txn: { direction: "debit", amountMinor: 129900, counterparty: "MYNTRA", last4: "0271", occurredAt: new Date("2026-10-21T12:52:10.000Z") },
     });
+  });
+
+  it("HDFC card email: 'we wish to inform you that Rs …' names the merchant, not the sentence", () => {
+    const text = "Alert : Update on your HDFC Bank Credit Card\nDear Card Member, We wish to inform you that Rs. 3283.36 has been debited from your HDFC Bank Credit Card ending 0271 towards MAKEMYTRIP INDIA PVT LTD on 12 Oct, 2026 at 06:13:10.";
+    const r = parseSms("alerts@hdfcbank.net", text, new Date("2026-10-12T01:00:00Z"), TZ);
+    expect(r).toMatchObject({ kind: "transaction", txn: { direction: "debit", amountMinor: 328336, counterparty: "MAKEMYTRIP INDIA PVT LTD", last4: "0271" } });
   });
 
   it("ICICI email: 'has been used for INR … towards MERCHANT'", () => {
@@ -236,6 +242,14 @@ describe("SMS and email for the same payment", () => {
   });
 });
 
+describe("MailPoller", () => {
+  it("survives the database being unreachable (it runs from a timer)", async () => {
+    const broken = (() => Promise.reject(Object.assign(new Error("write CONNECT_TIMEOUT"), { code: "CONNECT_TIMEOUT" }))) as unknown as typeof sql;
+    const poller = new MailPoller(broken, sealer, TZ, new FakeMailbox());
+    await expect(poller.syncDue()).resolves.toBeUndefined();
+  });
+});
+
 describe("mail server addresses", () => {
   it.each(["127.0.0.1", "10.0.0.5", "172.20.0.3", "192.168.1.34", "169.254.169.254", "100.64.1.1", "::1", "::ffff:127.0.0.1", "fe80::1", "0.0.0.0"])(
     "refuses %s before connecting",
@@ -320,6 +334,39 @@ describe("mail API", () => {
     expect((await app.inject({ method: "DELETE", url: `/v1/mail/${list[0].id}`, headers: { authorization: `Bearer ${t2.token}` } })).statusCode).toBe(404);
     expect((await app.inject({ method: "DELETE", url: `/v1/mail/${list[0].id}`, headers: auth() })).statusCode).toBe(204);
     expect((await app.inject({ url: "/v1/mail", headers: auth() })).json().mailboxes.map((m: { address: string }) => m.address)).toEqual(["kage.work@outlook.com"]);
+  });
+
+  it("nudges to connect a mailbox: again after 1 day, then 7 days, then never; the dot stays until connected", async () => {
+    const nudges = async () => (await app.inject({ url: "/v1/nudges", headers: auth() })).json().mail;
+    const dismiss = () => app.inject({ method: "POST", url: "/v1/nudges/mail/dismiss", headers: auth() });
+    const nextAt = async () => (await sql`select mail_nudge_next_at as at from users where id = ${userId}`)[0]!.at as Date | null;
+    const passTime = () => sql`update users set mail_nudge_next_at = now() - interval '1 second' where id = ${userId}`;
+
+    expect(await nudges()).toEqual({ pending: true, show: true });
+
+    await dismiss();
+    expect(await nudges()).toEqual({ pending: true, show: false });
+    expect(Math.round(((await nextAt())!.getTime() - Date.now()) / 3_600_000)).toBe(24);
+    await passTime();
+    expect(await nudges()).toEqual({ pending: true, show: true });
+
+    await dismiss();
+    expect(Math.round(((await nextAt())!.getTime() - Date.now()) / 86_400_000)).toBe(7);
+    expect((await nudges()).show).toBe(false);
+    await passTime();
+    expect((await nudges()).show).toBe(true);
+
+    await dismiss();
+    expect(await nextAt()).toBeNull();
+    expect(await nudges()).toEqual({ pending: true, show: false }); // never again, but the dot stays
+
+    await put("kage@gmail.com");
+    expect(await nudges()).toEqual({ pending: false, show: false });
+  });
+
+  it("a connected mailbox hides the banner and the dot from the start", async () => {
+    await put("kage@gmail.com");
+    expect((await app.inject({ url: "/v1/nudges", headers: auth() })).json()).toEqual({ mail: { pending: false, show: false } });
   });
 
   it("only allows TLS on port 993 and plain host names", async () => {

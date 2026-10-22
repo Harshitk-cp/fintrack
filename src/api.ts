@@ -3,7 +3,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Assistant } from "./assistant.ts";
 import { checkPin, hashPin, isWeakPin, normalizePhone, PIN_RE, type PinCheck } from "./auth.ts";
-import { CATEGORIES, CATEGORY_IDS } from "./categories.ts";
+import { BUCKET, CATEGORIES, CATEGORY_IDS } from "./categories.ts";
 import { newDeviceToken, normalizePairingCode, sha256, type Sealer } from "./crypto.ts";
 import type { Sql } from "./db.ts";
 import { ingestSms } from "./ingest.ts";
@@ -11,8 +11,9 @@ import { createManual, deleteManual, getTransaction, listTransactions, updateTra
 import { newPushTopic, type Notifier } from "./notify.ts";
 import { imapServerFor } from "./mail/filter.ts";
 import { MailAuthError, MailHostError, type MailSource } from "./mail/source.ts";
+import { markPaid } from "./sips.ts";
 import { looksLikeOtp } from "./sms/parser.ts";
-import { isReceived, isRefund, isSpend } from "./stats.ts";
+import { isReceived, isRefund, isSaved, isSpend } from "./stats.ts";
 
 interface Device {
   id: string;
@@ -34,6 +35,8 @@ export interface ApiDeps {
   notifier?: Notifier | null;
   assistant?: Assistant | null;
   mail?: { source: MailSource; poller: { kick(accountId: string): void } } | null;
+  /** True when the server can send Android push through Firebase. */
+  fcm?: boolean;
 }
 
 // iOS Shortcuts sends "" for unset fields and may format Sender loosely, so
@@ -86,6 +89,7 @@ const SettingsBody = z.object({
   alert_min_minor: z.number().int().min(0).max(100_000_000).optional(),
   digest_hour: z.number().int().min(0).max(23).optional(),
   monthly_budget_minor: z.number().int().positive().max(10_000_000_000).nullable().optional(),
+  monthly_income_minor: z.number().int().positive().max(100_000_000_000).nullable().optional(),
   push_enabled: z.boolean().optional(),
 });
 
@@ -107,7 +111,12 @@ const DeviceInfo = {
   platform: z.enum(["ios", "android", "other"]).default("other"),
   device_name: z.string().trim().min(1).max(60).default("Phone"),
 };
-const RegisterBody = z.object({ phone: Phone, pin: Pin, name: z.string().trim().min(1).max(40), ...DeviceInfo });
+const RegisterBody = z.object({
+  phone: Phone, pin: Pin, name: z.string().trim().min(1).max(40),
+  /** Monthly take-home pay in paise; optional. */
+  monthly_income_minor: z.number().int().positive().max(100_000_000_000).nullable().optional(),
+  ...DeviceInfo,
+});
 const LoginBody = z.object({ phone: Phone, pin: Pin, ...DeviceInfo });
 const PinBody = z.object({ pin: Pin });
 const ChangePinBody = z.object({ current_pin: Pin, new_pin: Pin });
@@ -125,7 +134,18 @@ const SummaryQuery = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
 const MAX_BACKFILL_MS = 30 * 86_400_000;
 
-export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecognized, notifier = null, assistant = null, mail = null }: ApiDeps) {
+/** Spending split into needs and wants (uncategorised kept apart), plus savings. */
+function buckets(byCategory: { category: string | null; spent: number }[], saved: number) {
+  const out = { needs: 0, wants: 0, unsorted: 0, savings: saved };
+  for (const c of byCategory) {
+    const b = c.category ? BUCKET[c.category] : undefined;
+    if (b === "needs" || b === "wants") out[b] += c.spent;
+    else out.unsorted += c.spent;
+  }
+  return out;
+}
+
+export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecognized, notifier = null, assistant = null, mail = null, fcm = false }: ApiDeps) {
   const app = Fastify({
     trustProxy: true, // behind Caddy
     bodyLimit: 16 * 1024,
@@ -234,7 +254,7 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
     if (isWeakPin(b.pin)) return reply.code(400).send({ error: "weak_pin" });
     const pinHash = await hashPin(b.pin);
     const [user] = await sql`
-      insert into users (name, phone, pin_hash) values (${b.name}, ${b.phone}, ${pinHash})
+      insert into users (name, phone, pin_hash, monthly_income_minor) values (${b.name}, ${b.phone}, ${pinHash}, ${b.monthly_income_minor ?? null})
       on conflict (phone) do nothing returning id, name, phone`;
     if (!user) return reply.code(409).send({ error: "phone_taken" });
     const device = await newDevice(user.id, b.platform, b.device_name);
@@ -276,7 +296,30 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
   });
 
   app.post("/v1/auth/logout", authed, async (req, reply) => {
-    await sql`update devices set revoked_at = now() where id = ${req.device.id}`;
+    await sql.begin(async (tx) => {
+      await tx`update devices set revoked_at = now() where id = ${req.device.id}`;
+      await tx`delete from push_tokens where device_id = ${req.device.id}`; // no more pushes to a signed-out phone
+    });
+    return reply.code(204).send();
+  });
+
+  // Android phones register their Firebase token; a token moves with whoever signs in on that phone.
+  const FcmBody = z.object({ token: z.string().trim().min(20).max(4096) });
+  app.put("/v1/push/fcm", authed, async (req, reply) => {
+    if (!fcm) return reply.code(503).send({ error: "fcm_disabled" });
+    const parsed = FcmBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    await sql.begin(async (tx) => {
+      await tx`delete from push_tokens where device_id = ${req.device.id} and token <> ${parsed.data.token}`; // one token per install
+      await tx`
+        insert into push_tokens (token, user_id, device_id) values (${parsed.data.token}, ${req.device.userId}, ${req.device.id})
+        on conflict (token) do update set user_id = excluded.user_id, device_id = excluded.device_id, last_error = null`;
+    });
+    return reply.code(204).send();
+  });
+
+  app.delete("/v1/push/fcm", authed, async (req, reply) => {
+    await sql`delete from push_tokens where device_id = ${req.device.id}`;
     return reply.code(204).send();
   });
 
@@ -294,7 +337,7 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
   app.get("/v1/summary", authed, async (req, reply) => {
     const q = SummaryQuery.safeParse(req.query);
     if (!q.success) return reply.code(400).send({ error: "invalid_query" });
-    const [u] = await sql`select time_zone, monthly_budget_minor from users where id = ${req.device.userId}`;
+    const [u] = await sql`select time_zone, monthly_budget_minor, monthly_income_minor from users where id = ${req.device.userId}`;
     const tz: string = u!.time_zone;
     const month = q.data.month ?? new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit" }).format(new Date());
     const scope = sql`
@@ -307,6 +350,7 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
         coalesce(sum(amount_minor) filter (where ${isRefund(sql)}), 0) as refunds_minor,
         coalesce(sum(amount_minor) filter (where ${isReceived(sql)}), 0) as received_minor,
         coalesce(sum(amount_minor) filter (where t.event_type = 'cash_withdrawal' and not t.excluded), 0) as cash_withdrawn_minor,
+        coalesce(sum(amount_minor) filter (where ${isSaved(sql)}), 0) as invested_minor,
         count(*) filter (where not t.excluded)::int as transaction_count
       ${scope}`;
     const byBank = await sql`
@@ -318,6 +362,10 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
       select t.category, sum(amount_minor) as spent_minor, count(*)::int as transaction_count
       ${scope} and ${isSpend(sql)}
       group by 1 order by 2 desc`;
+    // SIPs marked paid that no bank message matched; ones linked to a transaction are already in invested_minor.
+    const [sipOnly] = await sql`
+      select coalesce(sum(p.amount_minor), 0) as total from sip_payments p join sips s on s.id = p.sip_id
+      where s.user_id = ${req.device.userId} and p.month = ${month} and p.transaction_id is null`;
     const [{ pending }] = (await sql`
       select count(*)::int as pending from transactions
       where user_id = ${req.device.userId} and review_reason is not null and reviewed_at is null`) as unknown as [{ pending: number }];
@@ -331,6 +379,10 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
       cash_withdrawn_minor: n(totals!.cash_withdrawn_minor),
       transaction_count: totals!.transaction_count,
       budget_minor: u!.monthly_budget_minor === null ? null : n(u!.monthly_budget_minor),
+      /** Monthly take-home the user entered; falls back to money received in the app. */
+      income_minor: u!.monthly_income_minor === null ? null : n(u!.monthly_income_minor),
+      saved_minor: n(totals!.invested_minor) + n(sipOnly!.total),
+      buckets: buckets(byCategory.map((r) => ({ category: r.category, spent: n(r.spent_minor) })), n(totals!.invested_minor) + n(sipOnly!.total)),
       review_count: pending,
       by_bank: byBank.map((r) => ({ institution_name: r.institution_name, spent_minor: n(r.spent_minor), transaction_count: r.transaction_count })),
       by_category: byCategory.map((r) => ({ category: r.category, spent_minor: n(r.spent_minor), transaction_count: r.transaction_count })),
@@ -409,11 +461,15 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
   });
 
   const settingsOut = async (userId: string) => {
-    const [u] = await sql`select alert_min_minor, digest_hour, monthly_budget_minor, push_topic, time_zone from users where id = ${userId}`;
+    const [u] = await sql`
+      select alert_min_minor, digest_hour, monthly_budget_minor, monthly_income_minor, push_topic, time_zone,
+             (select count(*)::int from push_tokens p where p.user_id = users.id) as fcm_devices
+      from users where id = ${userId}`;
     return {
       alert_min_minor: Number(u!.alert_min_minor),
       digest_hour: u!.digest_hour,
       monthly_budget_minor: u!.monthly_budget_minor === null ? null : Number(u!.monthly_budget_minor),
+      monthly_income_minor: u!.monthly_income_minor === null ? null : Number(u!.monthly_income_minor),
       time_zone: u!.time_zone,
       push: {
         available: !!notifier?.pushServer,
@@ -421,6 +477,8 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
         server: notifier?.pushServer ?? null,
         topic: u!.push_topic,
       },
+      /** Android system notifications through Firebase. */
+      fcm: { available: fcm, devices: u!.fcm_devices },
     };
   };
 
@@ -431,7 +489,7 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
     if (!b.success) return reply.code(400).send({ error: "invalid_body", issues: b.error.issues });
     const s = b.data;
     if (s.push_enabled && !notifier?.pushServer) return reply.code(409).send({ error: "push_not_configured" });
-    const [cur] = await sql`select alert_min_minor, digest_hour, monthly_budget_minor, push_topic from users where id = ${req.device.userId}`;
+    const [cur] = await sql`select alert_min_minor, digest_hour, monthly_budget_minor, monthly_income_minor, push_topic from users where id = ${req.device.userId}`;
     // Turning push on keeps an existing topic so the phone stays subscribed.
     const topic = s.push_enabled === undefined ? cur!.push_topic : s.push_enabled ? (cur!.push_topic ?? newPushTopic()) : null;
     await sql`
@@ -439,6 +497,7 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
         alert_min_minor = ${s.alert_min_minor ?? cur!.alert_min_minor},
         digest_hour = ${s.digest_hour ?? cur!.digest_hour},
         monthly_budget_minor = ${s.monthly_budget_minor === undefined ? cur!.monthly_budget_minor : s.monthly_budget_minor},
+        monthly_income_minor = ${s.monthly_income_minor === undefined ? cur!.monthly_income_minor : s.monthly_income_minor},
         push_topic = ${topic}
       where id = ${req.device.userId}`;
     return settingsOut(req.device.userId);
@@ -446,8 +505,10 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
 
   // Sends a test push so the user can check their ntfy subscription.
   app.post("/v1/settings/push/test", { ...authed, config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (req, reply) => {
-    const [u] = await sql`select push_topic from users where id = ${req.device.userId}`;
-    if (!notifier?.pushServer || !u!.push_topic) return reply.code(409).send({ error: "push_not_enabled" });
+    const [u] = await sql`
+      select push_topic, exists (select 1 from push_tokens p where p.user_id = users.id) as has_fcm from users where id = ${req.device.userId}`;
+    const ntfyOn = !!notifier?.pushServer && !!u!.push_topic;
+    if (!notifier || (!ntfyOn && !(fcm && u!.has_fcm))) return reply.code(409).send({ error: "push_not_enabled" });
     await sql`insert into notifications (user_id, kind, title, body) values (${req.device.userId}, 'digest', 'Fintrack test', 'Push notifications are working.')`;
     notifier.kick();
     return { ok: true };
@@ -495,6 +556,140 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
     if (!acc) return reply.code(409).send({ error: "too_many_mailboxes" });
     mail.poller.kick(acc.id);
     return { available: true, max: MAX_MAILBOXES, mailboxes: await mailboxes(req.device.userId) };
+  });
+
+  // SIPs: the user's list with this month's paid status, and alerts the assistant couldn't pin down.
+  const Month = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+  const SipBody = z.object({
+    name: z.string().trim().min(1).max(80),
+    amount_minor: z.number().int().positive().max(10_000_000_000),
+    day_of_month: z.number().int().min(1).max(31).nullable().optional(),
+    /** Adding from a suggestion marks that alert's month as paid. */
+    from_suggestion: z.uuid().optional(),
+  });
+  const SipPatch = SipBody.omit({ from_suggestion: true }).partial().extend({ active: z.boolean().optional() });
+  const currentMonth = async (userId: string) => {
+    const [u] = await sql`select time_zone from users where id = ${userId}`;
+    return new Intl.DateTimeFormat("en-CA", { timeZone: u!.time_zone, year: "numeric", month: "2-digit" }).format(new Date());
+  };
+  async function sipsOut(userId: string, month: string) {
+    const sips = await sql`
+      select s.id, s.name, s.amount_minor, s.day_of_month, s.source, s.active,
+             p.amount_minor as paid_minor, p.paid_at, p.transaction_id as paid_transaction_id
+      from sips s left join sip_payments p on p.sip_id = s.id and p.month = ${month}
+      where s.user_id = ${userId} order by s.active desc, s.created_at`;
+    const suggestions = await sql`
+      select g.id, g.scheme, g.amount_minor, g.transaction_id, g.created_at, coalesce(e.occurred_at, e.observed_at) as seen_at
+      from sip_suggestions g join evidence e on e.id = g.evidence_id
+      where g.user_id = ${userId} and g.status = 'needs_user' order by g.created_at desc`;
+    const n = (v: unknown) => (v === null ? null : Number(v));
+    return {
+      month,
+      sips: sips.map((s) => ({
+        id: s.id, name: s.name, amount_minor: Number(s.amount_minor), day_of_month: s.day_of_month, source: s.source, active: s.active,
+        paid: s.paid_minor === null ? null : { amount_minor: Number(s.paid_minor), paid_at: s.paid_at, transaction_id: s.paid_transaction_id },
+      })),
+      suggestions: suggestions.map((g) => ({ id: g.id, scheme: g.scheme, amount_minor: n(g.amount_minor), transaction_id: g.transaction_id, seen_at: g.seen_at })),
+    };
+  }
+
+  app.get("/v1/sips", authed, async (req, reply) => {
+    const m = Month.optional().safeParse((req.query as { month?: string }).month);
+    if (!m.success) return reply.code(400).send({ error: "invalid_month" });
+    return sipsOut(req.device.userId, m.data ?? (await currentMonth(req.device.userId)));
+  });
+
+  app.post("/v1/sips", authed, async (req, reply) => {
+    const parsed = SipBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    const b = parsed.data;
+    const userId = req.device.userId;
+    const created = await sql.begin(async (tx) => {
+      const [sip] = await tx`
+        insert into sips (user_id, name, amount_minor, day_of_month) values (${userId}, ${b.name}, ${b.amount_minor}, ${b.day_of_month ?? null})
+        on conflict (user_id, lower(name)) do nothing returning id`;
+      if (!sip) return null;
+      if (b.from_suggestion) {
+        const [g] = await tx`
+          update sip_suggestions g set status = 'added' from evidence e
+          where g.id = ${b.from_suggestion} and g.user_id = ${userId} and e.id = g.evidence_id
+          returning g.transaction_id, coalesce(e.occurred_at, e.observed_at) as at`;
+        if (g) {
+          const [u] = await tx`select time_zone from users where id = ${userId}`;
+          const month = new Intl.DateTimeFormat("en-CA", { timeZone: u!.time_zone, year: "numeric", month: "2-digit" }).format(g.at);
+          await markPaid(tx, sip.id, month, b.amount_minor, g.transaction_id);
+        }
+      }
+      return sip;
+    });
+    if (!created) return reply.code(409).send({ error: "sip_exists" });
+    return reply.code(201).send(await sipsOut(userId, await currentMonth(userId)));
+  });
+
+  app.patch("/v1/sips/:id", authed, async (req, reply) => {
+    const id = Id.safeParse(req.params);
+    const parsed = SipPatch.safeParse(req.body);
+    if (!id.success || !parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    const b = parsed.data;
+    const r = await sql`
+      update sips set
+        name = coalesce(${b.name ?? null}, name), amount_minor = coalesce(${b.amount_minor ?? null}, amount_minor),
+        day_of_month = ${b.day_of_month === undefined ? sql`day_of_month` : b.day_of_month}, active = coalesce(${b.active ?? null}, active)
+      where id = ${id.data.id} and user_id = ${req.device.userId}`;
+    if (!r.count) return reply.code(404).send({ error: "not_found" });
+    return sipsOut(req.device.userId, await currentMonth(req.device.userId));
+  });
+
+  app.delete("/v1/sips/:id", authed, async (req, reply) => {
+    const id = Id.safeParse(req.params);
+    if (!id.success) return reply.code(400).send({ error: "invalid_id" });
+    const r = await sql`delete from sips where id = ${id.data.id} and user_id = ${req.device.userId}`;
+    return r.count ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
+  });
+
+  /** Ticks or unticks a month: a paid SIP counts as savings. */
+  app.put("/v1/sips/:id/paid", authed, async (req, reply) => {
+    const id = Id.safeParse(req.params);
+    const body = z.object({ month: Month, paid: z.boolean() }).safeParse(req.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "invalid_body" });
+    const [sip] = await sql`select id, amount_minor from sips where id = ${id.data.id} and user_id = ${req.device.userId}`;
+    if (!sip) return reply.code(404).send({ error: "not_found" });
+    if (body.data.paid) await markPaid(sql, sip.id, body.data.month, Number(sip.amount_minor), null);
+    else await sql`delete from sip_payments where sip_id = ${sip.id} and month = ${body.data.month}`;
+    return sipsOut(req.device.userId, body.data.month);
+  });
+
+  app.post("/v1/sips/suggestions/:id/dismiss", authed, async (req, reply) => {
+    const id = Id.safeParse(req.params);
+    if (!id.success) return reply.code(400).send({ error: "invalid_id" });
+    await sql`update sip_suggestions set status = 'dismissed' where id = ${id.data.id} and user_id = ${req.device.userId}`;
+    return reply.code(204).send();
+  });
+
+  // The banner asking people to connect a mailbox: after each dismissal it waits
+  // 1 day, then 7 days, then stops for good. `pending` (no mailbox yet) drives the
+  // dot on the Settings tab, which stays until a mailbox is connected.
+  const NUDGE_DELAYS = ["1 day", "7 days"];
+  app.get("/v1/nudges", authed, async (req) => {
+    const [u] = await sql`
+      select mail_nudge_dismissals as dismissals, mail_nudge_next_at as next_at,
+             exists (select 1 from mail_accounts m where m.user_id = users.id) as connected
+      from users where id = ${req.device.userId}`;
+    const pending = !!mail && !u!.connected;
+    const show = pending && u!.dismissals <= NUDGE_DELAYS.length && (!u!.next_at || new Date(u!.next_at) <= new Date());
+    return { mail: { pending, show } };
+  });
+
+  app.post("/v1/nudges/mail/dismiss", authed, async (req, reply) => {
+    // Delay for this dismissal (1st: 1 day, 2nd: 7 days); after the last one, next_at is null and the count ends it.
+    await sql`
+      update users set
+        mail_nudge_dismissals = mail_nudge_dismissals + 1,
+        mail_nudge_next_at = case mail_nudge_dismissals
+          ${sql.unsafe(NUDGE_DELAYS.map((d, i) => `when ${i} then now() + interval '${d}'`).join(" "))}
+          else null end
+      where id = ${req.device.userId}`;
+    return reply.code(204).send();
   });
 
   /** Syncs all of the user's mailboxes now, or one with `?id=`. */

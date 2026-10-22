@@ -2,6 +2,7 @@ import { classify, type PayeeRule } from "./classify.ts";
 import { sha256, type Sealer } from "./crypto.ts";
 import type { Sql, Tx } from "./db.ts";
 import { groundExtraction, type SmsExtractor } from "./llm.ts";
+import { mentionsSip } from "./sips.ts";
 import { parseSms, type ParseResult, type ParsedTxn } from "./sms/parser.ts";
 
 const DAY_MS = 86_400_000;
@@ -68,7 +69,9 @@ async function ingest(sql: Sql, sealer: Sealer, timeZone: string, sourceType: So
   const hash = sha256(sourceType === "email" && input.sourceId ? `email:${input.sourceId}` : normalized);
   const parsed = parseSms(input.sender, input.body, input.receivedAt, timeZone);
 
-  const raw = parsed.kind === "ignored" ? null : sealer.seal(input.body);
+  // SIP mentions are read later (sips.ts), so their text is kept even when the message isn't a payment.
+  const sip = mentionsSip(input.body);
+  const raw = parsed.kind === "ignored" && !sip ? null : sealer.seal(input.body);
   const retainMs = parsed.kind === "unrecognized" ? RETAIN_UNRECOGNIZED_MS : RETAIN_PARSED_MS;
 
   return sql.begin(async (tx) => {
@@ -91,17 +94,20 @@ async function ingest(sql: Sql, sealer: Sealer, timeZone: string, sourceType: So
       };
     }
 
-    const r = await applyParseResult(tx, ev.id, input.userId, parsed, input.receivedAt, sourceType);
+    const r = await applyParseResult(tx, ev.id, input.userId, parsed, input.receivedAt, sourceType, sip);
+    if (sip) {
+      await tx`insert into sip_suggestions (user_id, evidence_id, transaction_id) values (${input.userId}, ${ev.id}, ${r.transactionId})`;
+    }
     return { evidenceId: ev.id, ...r, duplicate: false };
   }) as Promise<IngestOutcome>;
 }
 
 /** Records a parse result on an evidence row and, for transactions, resolves and links it. */
-async function applyParseResult(tx: Tx, evidenceId: string, userId: string, parsed: ParseResult, receivedAt: Date, sourceType: SourceType) {
+async function applyParseResult(tx: Tx, evidenceId: string, userId: string, parsed: ParseResult, receivedAt: Date, sourceType: SourceType, keepText = false) {
   if (parsed.kind !== "transaction") {
     await tx`
       update evidence set status = ${parsed.kind}, status_reason = ${parsed.reason}, parser = ${parsed.parser},
-        raw_content_enc = ${parsed.kind === "ignored" ? null : tx`raw_content_enc`}
+        raw_content_enc = ${parsed.kind === "ignored" && !keepText ? null : tx`raw_content_enc`}
       where id = ${evidenceId}`;
     return { status: parsed.kind, reason: parsed.reason, transactionId: null } as const;
   }

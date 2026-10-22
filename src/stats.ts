@@ -1,10 +1,13 @@
 // Spending totals shared by the summary API, alerts and the assistant.
 // Card bill payments, own-account transfers and ATM withdrawals move money
-// without spending it, and excluded transactions are left out entirely.
+// without spending it; investments (SIPs, brokers) are savings, not spending;
+// excluded transactions are left out entirely.
 import type { Sql } from "./db.ts";
 
-export const isSpend = (sql: Sql) =>
-  sql`t.direction = 'debit' and not t.excluded and t.event_type not in ('card_payment', 'transfer', 'cash_withdrawal')`;
+const MOVED = (sql: Sql) => sql`t.direction = 'debit' and not t.excluded and t.event_type not in ('card_payment', 'transfer', 'cash_withdrawal')`;
+export const isSpend = (sql: Sql) => sql`${MOVED(sql)} and coalesce(t.category, '') <> 'investments'`;
+/** Money put away: debits filed as investments. */
+export const isSaved = (sql: Sql) => sql`${MOVED(sql)} and t.category = 'investments'`;
 export const isRefund = (sql: Sql) => sql`t.direction = 'credit' and not t.excluded and t.event_type = 'refund'`;
 export const isReceived = (sql: Sql) =>
   sql`t.direction = 'credit' and not t.excluded and t.event_type not in ('refund', 'card_payment', 'transfer')`;

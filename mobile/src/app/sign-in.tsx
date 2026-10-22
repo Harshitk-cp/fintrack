@@ -6,9 +6,9 @@ import { Barcode, CyberButton, CyberField, MetaRule, Reveal, Wordmark } from "@/
 import { PixelIcon } from "@/components/pixel-icon";
 import { Card } from "@/components/ui";
 import { Text } from "@/components/text";
-import { ApiError, login, normalizeServerUrl, register } from "@/lib/api";
+import { ApiError, login, normalizeServerUrl, parseRupees, register } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { FONT, useTheme } from "@/lib/theme";
+import { FONT, MOTION, useTheme } from "@/lib/theme";
 
 // The server is fixed: the local backend in development (simulator / emulator), the VPS in release builds.
 const DEV_SERVER = Platform.OS === "android" ? "http://10.0.2.2:8080" : "http://localhost:8080";
@@ -33,11 +33,13 @@ export default function SignInScreen() {
   const [phone, setPhone] = useState("");
   const [pin, setPin] = useState("");
   const [name, setName] = useState("");
+  const [salary, setSalary] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const creating = mode === "register";
-  const valid = phone.replace(/\D/g, "").length >= 10 && /^\d{4}$/.test(pin) && (!creating || name.trim().length > 0);
+  const salaryOk = !salary.trim() || parseRupees(salary) !== null;
+  const valid = phone.replace(/\D/g, "").length >= 10 && /^\d{4}$/.test(pin) && (!creating || (name.trim().length > 0 && salaryOk));
 
   async function submit() {
     if (!valid || busy) return;
@@ -47,7 +49,7 @@ export default function SignInScreen() {
       const url = normalizeServerUrl(SERVER);
       const device = { platform: PLATFORM, device_name: DEVICE_NAME } as const;
       const res = creating
-        ? await register(url, { phone, pin, name: name.trim(), ...device })
+        ? await register(url, { phone, pin, name: name.trim(), monthly_income_minor: salary.trim() ? parseRupees(salary) : null, ...device })
         : await login(url, { phone, pin, ...device });
       await signIn({ serverUrl: url, token: res.token, userName: res.user.name, phone: res.user.phone });
     } catch (e) {
@@ -78,7 +80,7 @@ export default function SignInScreen() {
             </Card>
           </Reveal>
 
-          <Animated.View layout={LinearTransition.springify().damping(18)} style={{ marginTop: 26 }}>
+          <Animated.View layout={LinearTransition.duration(MOTION.base).easing(MOTION.ease)} style={{ marginTop: 26 }}>
             {creating && (
               <Animated.View entering={FadeIn.duration(220)} exiting={FadeOut.duration(150)}>
                 <CyberField label="Your name" value={name} onChangeText={setName} placeholder="Kage" autoCorrect={false} />
@@ -110,6 +112,20 @@ export default function SignInScreen() {
                 onSubmitEditing={submit}
               />
             </Reveal>
+            {creating && (
+              <Animated.View entering={FadeIn.duration(220)} exiting={FadeOut.duration(150)}>
+                <CyberField
+                  label="Monthly salary (take-home, optional)"
+                  value={salary}
+                  onChangeText={(v) => setSalary(v.replace(/[^\d.,]/g, ""))}
+                  placeholder="₹ e.g. 85,000"
+                  keyboardType="decimal-pad"
+                />
+                <Text style={{ color: t.muted, fontSize: 13, lineHeight: 18, marginTop: -10, marginBottom: 16, marginHorizontal: 4 }}>
+                  Used to show how much of it you’ve spent, and for gentle check-ins. Only you see it; change it any time in Settings.
+                </Text>
+              </Animated.View>
+            )}
 
             {error && (
               <Animated.View entering={FadeIn.duration(180)} style={[styles.error, { backgroundColor: t.accent }]}>

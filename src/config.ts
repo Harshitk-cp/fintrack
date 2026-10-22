@@ -17,6 +17,8 @@ export interface Config {
   // ntfy server for push alerts; users opt in from the app. "off" disables push.
   pushUrl: string | null;
   pushToken: string | null;
+  /** Firebase service account (JSON, a path to it, or base64) for Android push. */
+  fcmServiceAccount: string | null;
 }
 
 export function loadConfig(): Config {
@@ -29,5 +31,6 @@ export function loadConfig(): Config {
     llmModel: process.env.ANTHROPIC_API_KEY ? (process.env.FINTRACK_LLM_MODEL ?? DEFAULT_LLM_MODEL) : null,
     pushUrl: process.env.FINTRACK_PUSH_URL === "off" ? null : (process.env.FINTRACK_PUSH_URL ?? "https://ntfy.sh"),
     pushToken: process.env.FINTRACK_PUSH_TOKEN ?? null,
+    fcmServiceAccount: process.env.FINTRACK_FCM_SERVICE_ACCOUNT ?? null,
   };
 }
