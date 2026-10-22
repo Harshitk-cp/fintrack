@@ -1,0 +1,65 @@
+# Tests the backend, then deploys it to the VPS on every push to main that
+# touches server code. Mobile-only changes don't redeploy.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "Dockerfile"
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.4-alpine
+        env:
+          POSTGRES_USER: fintrack
+          POSTGRES_PASSWORD: fintrack
+          POSTGRES_DB: fintrack_test
+        ports: ["54329:5432"]
+        options: --health-cmd "pg_isready -U fintrack" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          # The server's public host key, so the connection can't be intercepted.
+          KNOWN_HOSTS: "35.170.7.31 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZjU9lN1lpJDjPlC+wwO2Tiy0tDutMN7UKi5c6OlVEg"
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # The key is pinned to deploy/deploy.sh on the server; no command is sent.
+          ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes ubuntu@35.170.7.31
+      - name: Check HTTPS
+        run: curl -fsS --retry 5 --retry-delay 3 https://35-170-7-31.sslip.io/healthz
