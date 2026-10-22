@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { ActivityIndicator, FlatList, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "react-native";
+import { Text, TextInput } from "@/components/text";
 import { Chip } from "@/components/ui";
 import { ApiError, ask, type ChatMessage } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { useTheme } from "@/lib/theme";
+import { tabBarTop, useTheme } from "@/lib/theme";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { PixelIcon } from "@/components/pixel-icon";
+import Animated, { FadeInDown, FadeInRight } from "react-native-reanimated";
 
 const SUGGESTIONS = [
   "How much have I spent this month?",
@@ -19,7 +22,6 @@ const MAX_HISTORY = 19;
 
 export default function AskScreen() {
   const t = useTheme();
-  const insets = useSafeAreaInsets();
   const { session } = useSession();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -28,15 +30,18 @@ export default function AskScreen() {
   const list = useRef<FlatList<ChatMessage>>(null);
   const [keyboard, setKeyboard] = useState(false);
   useEffect(() => {
-    const show = Keyboard.addListener("keyboardWillShow", () => setKeyboard(true));
-    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboard(false));
+    // Android only emits the "Did" events.
+    const show = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow", () => setKeyboard(true));
+    const hide = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide", () => setKeyboard(false));
     return () => {
       show.remove();
       hide.remove();
     };
   }, []);
-  // The iOS tab bar floats over the screen; keep the input above it unless the keyboard is up.
-  const bottomPad = Platform.OS === "ios" ? (keyboard ? 8 : insets.bottom + 54) : 8;
+  // The tab bar floats over the screen (both platforms): keep the input a clear gap above it,
+  // unless the keyboard is up and covers the bar anyway.
+  const insets = useSafeAreaInsets();
+  const bottomPad = keyboard ? 8 : tabBarTop(insets.bottom) + 14;
 
   async function send(text: string) {
     const q = text.trim();
@@ -92,21 +97,21 @@ export default function AskScreen() {
         renderItem={({ item }) => {
           const mine = item.role === "user";
           return (
-            <View style={[styles.bubble, mine ? [styles.mine, { backgroundColor: t.accent }] : [styles.theirs, { backgroundColor: t.card, borderColor: t.border }]]}>
-              <Text style={{ color: mine ? "#fff" : t.text, fontSize: 15, lineHeight: 21 }} selectable>
+            <Animated.View entering={mine ? FadeInRight.springify().damping(18) : FadeInDown.springify().damping(18)} style={[styles.bubble, mine ? [styles.mine, { backgroundColor: t.ink }] : [styles.theirs, { backgroundColor: t.card, borderColor: t.border }]]}>
+              <Text style={{ color: mine ? t.onInk : t.text, fontSize: 15, lineHeight: 21, fontWeight: mine ? "600" : "400" }} selectable>
                 {mine ? item.content : withBold(item.content)}
               </Text>
-            </View>
+            </Animated.View>
           );
         }}
         ListFooterComponent={
           <View>
             {busy && <ActivityIndicator style={{ alignSelf: "flex-start", margin: 8 }} color={t.muted} />}
-            {error && <Text style={{ color: t.danger, fontSize: 14 }}>{error}</Text>}
+            {error && <Text style={{ color: t.dangerText, fontSize: 14 }}>{error}</Text>}
           </View>
         }
       />
-      <View style={[styles.bar, { borderTopColor: t.border, backgroundColor: t.bg, paddingBottom: bottomPad }]}>
+      <View style={[styles.bar, { paddingBottom: bottomPad }]}>
         <TextInput
           style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.inputBg }]}
           value={input}
@@ -126,7 +131,7 @@ export default function AskScreen() {
           accessibilityLabel="Send"
           style={({ pressed }) => [styles.send, { backgroundColor: t.accent, opacity: !input.trim() || busy ? 0.4 : pressed ? 0.8 : 1 }]}
         >
-          <Text style={{ color: "#fff", fontSize: 18, fontWeight: "700" }}>↑</Text>
+          <PixelIcon name="arrow-up" size={22} color={t.onAccent} />
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -148,10 +153,10 @@ function withBold(text: string) {
 
 const styles = StyleSheet.create({
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  bubble: { maxWidth: "85%", borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10 },
-  mine: { alignSelf: "flex-end", borderBottomRightRadius: 4 },
-  theirs: { alignSelf: "flex-start", borderBottomLeftRadius: 4, borderWidth: StyleSheet.hairlineWidth },
-  bar: { flexDirection: "row", alignItems: "flex-end", gap: 8, paddingHorizontal: 12, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth },
-  input: { flex: 1, borderWidth: 1, borderRadius: 20, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 10, fontSize: 16, maxHeight: 120 },
-  send: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  bubble: { maxWidth: "85%", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 10 },
+  mine: { alignSelf: "flex-end", borderTopRightRadius: 12 },
+  theirs: { alignSelf: "flex-start", borderTopLeftRadius: 12, borderWidth: StyleSheet.hairlineWidth },
+  bar: { flexDirection: "row", alignItems: "flex-end", gap: 8, paddingHorizontal: 16, paddingTop: 8 },
+  input: { flex: 1, borderWidth: 1, borderRadius: 14, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 10, fontSize: 16, maxHeight: 120 },
+  send: { width: 44, height: 44, borderRadius: 14, alignItems: "center", justifyContent: "center" },
 });

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { buildApi } from "./api.ts";
 import { ClaudeAssistant } from "./assistant.ts";
+import { hashPin, isWeakPin, normalizePhone, PIN_RE } from "./auth.ts";
 import { loadConfig } from "./config.ts";
 import { newDataKey, newDeviceToken, newPairingCode, normalizePairingCode, Sealer, sha256 } from "./crypto.ts";
 import { connect, migrate } from "./db.ts";
@@ -17,7 +18,9 @@ const USAGE = `fintrack <command>
 
   serve                                           run migrations, then the HTTP API
   migrate                                         apply pending migrations
-  user add --name <name> [--email <email>]        create a user
+  user add --name <name> [--phone <no> --pin <4 digits>]
+                                                  create a user (people can also sign up in the app)
+  user set-pin --phone <no> --pin <4 digits>      reset a forgotten PIN and clear its lockout
   device add --user <id> --name <name> --platform ios|android|other
                                                   issue a collector token (shown once)
   pair --user <id> --name <name> --platform ios|android|other
@@ -34,7 +37,7 @@ async function main(argv: string[]) {
     options: {
       name: { type: "string" }, email: { type: "string" }, user: { type: "string" },
       platform: { type: "string" }, id: { type: "string" }, sender: { type: "string" },
-      llm: { type: "boolean" },
+      llm: { type: "boolean" }, phone: { type: "string" }, pin: { type: "string" },
     },
   });
 
@@ -101,7 +104,14 @@ async function main(argv: string[]) {
       console.log(applied.length ? `applied: ${applied.join(", ")}` : "up to date");
     } else if (cmd === "user" && sub === "add") {
       if (!values.name) throw new Error("--name is required");
-      const [u] = await sql`insert into users (name, email) values (${values.name}, ${values.email ?? null}) returning id`;
+      const phone = values.phone ? normalizePhone(values.phone) : null;
+      if (values.phone && !phone) throw new Error("--phone is not a valid phone number");
+      if (phone && !(values.pin && PIN_RE.test(values.pin))) throw new Error("--pin (4 digits) is required with --phone");
+      if (phone && isWeakPin(values.pin!)) throw new Error("--pin is too easy to guess (repeated, sequential or a year)");
+      const pinHash = phone ? await hashPin(values.pin!) : null;
+      const [u] = await sql`
+        insert into users (name, email, phone, pin_hash)
+        values (${values.name}, ${values.email ?? null}, ${phone}, ${pinHash}) returning id`;
       console.log(u!.id);
     } else if (cmd === "device" && sub === "add") {
       const platform = values.platform ?? "other";
@@ -121,6 +131,15 @@ async function main(argv: string[]) {
         insert into pairing_codes (code_hash, user_id, device_name, platform, expires_at)
         values (${sha256(normalizePairingCode(code))}, ${values.user}, ${values.name}, ${platform}, now() + interval '15 minutes')`;
       console.log(`pairing code (valid 15 min, single use): ${code}`);
+    } else if (cmd === "user" && sub === "set-pin") {
+      const phone = values.phone ? normalizePhone(values.phone) : null;
+      if (!phone) throw new Error("--phone is required");
+      if (!values.pin || !PIN_RE.test(values.pin)) throw new Error("--pin must be 4 digits");
+      if (isWeakPin(values.pin)) throw new Error("--pin is too easy to guess (repeated, sequential or a year)");
+      const r = await sql`
+        update users set pin_hash = ${await hashPin(values.pin)}, pin_failures = 0, pin_locked_until = null
+        where phone = ${phone}`;
+      console.log(r.count ? `PIN reset for ${phone}` : `no user with phone ${phone}`);
     } else if (cmd === "device" && sub === "revoke") {
       if (!values.id) throw new Error("--id is required");
       const r = await sql`update devices set revoked_at = now() where id = ${values.id} and revoked_at is null`;

@@ -1,6 +1,7 @@
 import { router, Stack, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { Text, TextInput } from "@/components/text";
 import { Button, CategoryPicker, Chip, HeaderButton, inputStyle, Row, Section } from "@/components/ui";
 import { ApiError, deleteTransaction, formatInr, getTransaction, parseRupees, updateTransaction, type TransactionDetail, type TransactionPatch } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
@@ -59,6 +60,7 @@ export default function TransactionScreen() {
       setError(e instanceof ApiError && e.status === 404 ? "This transaction no longer exists." : "Couldn't load it.");
     }
   }, [session, id]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- fetches on mount; state is only set once the request resolves
   useEffect(() => void load(), [load]);
 
   const manual = txn?.source === "manual";
@@ -109,7 +111,7 @@ export default function TransactionScreen() {
   }
 
   if (!txn) {
-    return <View style={styles.center}>{error ? <Text style={{ color: t.danger }}>{error}</Text> : <ActivityIndicator color={t.muted} />}</View>;
+    return <View style={styles.center}>{error ? <Text style={{ color: t.dangerText }}>{error}</Text> : <ActivityIndicator color={t.muted} />}</View>;
   }
 
   const credit = txn.direction === "credit";
@@ -120,7 +122,7 @@ export default function TransactionScreen() {
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
-      <Stack.Screen options={{ headerRight: () => <HeaderButton label={saving ? "Saving…" : "Save"} onPress={save} /> }} />
+      <Stack.Screen options={{ headerRight: () => <HeaderButton label={saving ? "Saving…" : "Save"} icon="check" onPress={save} /> }} />
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         <View style={styles.hero}>
           <Text style={[styles.amount, { color: credit ? t.credit : t.text }]}>
@@ -132,11 +134,11 @@ export default function TransactionScreen() {
           </Text>
           <Text style={{ color: t.muted, fontSize: 14, marginTop: 4 }}>{formatDateTime(txn.occurred_at)}</Text>
           {needsReview && (
-            <Text style={{ color: t.danger, fontSize: 14, marginTop: 10, fontWeight: "600" }}>{REVIEW_PROMPT[txn.review_reason!]}</Text>
+            <Text style={{ color: t.dangerText, fontSize: 14, marginTop: 10, fontWeight: "600" }}>{REVIEW_PROMPT[txn.review_reason!]}</Text>
           )}
         </View>
 
-        {error && <Text style={{ color: t.danger, marginBottom: 12 }}>{error}</Text>}
+        {error && <Text style={{ color: t.dangerText, marginBottom: 12 }}>{error}</Text>}
 
         <Section title="Name">
           <TextInput

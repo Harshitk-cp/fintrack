@@ -91,14 +91,15 @@ The Expo app runs on iOS and Android. It has four tabs:
 - **Ask:** questions about your spending, answered by the assistant.
 - **Settings:** alert threshold, daily summary time, budget, push setup, account, the SMS collector status on Android and the Shortcut setup guide on iOS.
 
-Before pairing, the app shows the **Pair** screen: the server URL and a pairing code.
-
-Pairing replaces typing a long token into a phone:
+**Accounts.** People sign up in the app with a phone number and a 4-digit PIN, and sign in with the same on any other phone; every phone gets its own token for the same account. The number isn't verified, it only names the account. Five wrong PINs lock the account for 15 minutes, doubling with each further five (up to a day), and sign-in is limited to 10 tries a minute per IP. A forgotten PIN is reset on the server:
 
 ```sh
-pnpm -s fintrack pair --user <user-id> --name "Friend's Pixel" --platform android
-# pairing code (valid 15 min, single use): K7P4-QX9M
+pnpm -s fintrack user set-pin --phone 9876543210 --pin 4821
 ```
+
+**App lock.** The app locks every time it opens or returns from the background. Face ID, Touch ID or the fingerprint unlocks it, and the account PIN is the fallback. The lock screen also hides balances in the app switcher.
+
+Pairing codes (`fintrack pair --user <id> …`) still work through the API, for scripts and collectors, but the app signs in with phone and PIN.
 
 Running locally:
 

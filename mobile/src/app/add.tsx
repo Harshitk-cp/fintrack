@@ -1,6 +1,7 @@
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from "react-native";
+import { Text, TextInput } from "@/components/text";
 import { Button, CategoryPicker, Chip, inputStyle, Section } from "@/components/ui";
 import { addTransaction, getTransactions, parseRupees } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
@@ -28,6 +29,7 @@ export default function AddScreen() {
   const [dayOffset, setDayOffset] = useState(0);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [openedAt] = useState(() => Date.now()); // fixed for this screen so the date label is stable
   const [error, setError] = useState<string | null>(null);
 
   // Offer the banks the user already has transactions with.
@@ -120,7 +122,7 @@ export default function AddScreen() {
             ))}
           </View>
           <Text style={{ color: t.muted, fontSize: 13 }}>
-            {new Date(Date.now() - dayOffset * 86_400_000).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", timeZone: TZ })}
+            {new Date(openedAt - dayOffset * 86_400_000).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", timeZone: TZ })}
           </Text>
         </Section>
 
@@ -128,7 +130,7 @@ export default function AddScreen() {
           <TextInput style={inputStyle(t)} value={note} onChangeText={setNote} placeholder="Optional" placeholderTextColor={t.muted} />
         </Section>
 
-        {error && <Text style={{ color: t.danger, marginBottom: 12 }}>{error}</Text>}
+        {error && <Text style={{ color: t.dangerText, marginBottom: 12 }}>{error}</Text>}
         <Button title={direction === "debit" ? "Add expense" : "Add income"} onPress={save} busy={saving} disabled={!valid} />
       </ScrollView>
     </KeyboardAvoidingView>

@@ -4,6 +4,7 @@ export interface Session {
   serverUrl: string;
   token: string;
   userName: string;
+  phone?: string | null;
 }
 
 export type ReviewReason = "unknown_payee" | "uncategorized" | "llm_parsed";
@@ -127,11 +128,27 @@ export function normalizeServerUrl(url: string): string {
   return u;
 }
 
-export function pair(serverUrl: string, code: string) {
-  return request<{ token: string; device_id: string; user: { id: string; name: string } }>(serverUrl, "/v1/pair", {
-    method: "POST",
-    body: JSON.stringify({ code }),
-  });
+type AuthResult = { token: string; device_id: string; user: { id: string; name: string; phone: string } };
+type DeviceInfo = { platform: "ios" | "android" | "other"; device_name: string };
+
+export function register(serverUrl: string, body: { phone: string; pin: string; name: string } & DeviceInfo) {
+  return request<AuthResult>(serverUrl, "/v1/auth/register", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function login(serverUrl: string, body: { phone: string; pin: string } & DeviceInfo) {
+  return request<AuthResult>(serverUrl, "/v1/auth/login", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function verifyPin(s: Session, pin: string) {
+  return authed<{ ok: true }>(s, "/v1/auth/verify-pin", "POST", { pin });
+}
+
+export function changePin(s: Session, current_pin: string, new_pin: string) {
+  return authed<void>(s, "/v1/auth/pin", "POST", { current_pin, new_pin });
+}
+
+export function logout(s: Session) {
+  return authed<void>(s, "/v1/auth/logout", "POST", {});
 }
 
 const authed = <T>(s: Session, path: string, method = "GET", body?: unknown) =>

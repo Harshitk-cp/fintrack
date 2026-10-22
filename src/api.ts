@@ -1,7 +1,8 @@
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Assistant } from "./assistant.ts";
+import { checkPin, hashPin, isWeakPin, normalizePhone, PIN_RE, type PinCheck } from "./auth.ts";
 import { CATEGORIES, CATEGORY_IDS } from "./categories.ts";
 import { newDeviceToken, normalizePairingCode, sha256, type Sealer } from "./crypto.ts";
 import type { Sql } from "./db.ts";
@@ -97,6 +98,17 @@ const AskBody = z.object({
 
 const PairBody = z.object({ code: z.string().trim().min(8).max(20) });
 
+const Phone = z.string().max(20).transform((s, ctx) => normalizePhone(s) ?? (ctx.addIssue({ code: "custom", message: "invalid_phone" }), z.NEVER));
+const Pin = z.string().regex(PIN_RE);
+const DeviceInfo = {
+  platform: z.enum(["ios", "android", "other"]).default("other"),
+  device_name: z.string().trim().min(1).max(60).default("Phone"),
+};
+const RegisterBody = z.object({ phone: Phone, pin: Pin, name: z.string().trim().min(1).max(40), ...DeviceInfo });
+const LoginBody = z.object({ phone: Phone, pin: Pin, ...DeviceInfo });
+const PinBody = z.object({ pin: Pin });
+const ChangePinBody = z.object({ current_pin: Pin, new_pin: Pin });
+
 const SummaryQuery = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() });
 
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
@@ -190,12 +202,79 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
     return result;
   });
 
+  // Phone + PIN accounts. Per-IP limits here, per-account lockouts in checkPin.
+  const authLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute", keyGenerator: (r: FastifyRequest) => r.ip } } };
+
+  async function newDevice(userId: string, platform: string, name: string) {
+    const { token, hash } = newDeviceToken();
+    const [d] = await sql`insert into devices (user_id, name, platform, token_hash) values (${userId}, ${name}, ${platform}, ${hash}) returning id`;
+    return { token, device_id: d!.id as string };
+  }
+
+  const pinFailure = (reply: FastifyReply, r: Exclude<PinCheck, { ok: true }>, wrong = "wrong_pin") =>
+    r.reason === "locked"
+      ? reply.code(429).header("retry-after", String(r.retryAfterS)).send({ error: "locked", retry_after_s: r.retryAfterS })
+      : reply.code(401).send({ error: wrong });
+
+  app.post("/v1/auth/register", authLimit, async (req, reply) => {
+    const parsed = RegisterBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.some((i) => i.message === "invalid_phone") ? "invalid_phone" : "invalid_body" });
+    const b = parsed.data;
+    if (isWeakPin(b.pin)) return reply.code(400).send({ error: "weak_pin" });
+    const pinHash = await hashPin(b.pin);
+    const [user] = await sql`
+      insert into users (name, phone, pin_hash) values (${b.name}, ${b.phone}, ${pinHash})
+      on conflict (phone) do nothing returning id, name, phone`;
+    if (!user) return reply.code(409).send({ error: "phone_taken" });
+    const device = await newDevice(user.id, b.platform, b.device_name);
+    return reply.code(201).send({ ...device, user: { id: user.id, name: user.name, phone: user.phone } });
+  });
+
+  app.post("/v1/auth/login", authLimit, async (req, reply) => {
+    const parsed = LoginBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.some((i) => i.message === "invalid_phone") ? "invalid_phone" : "invalid_body" });
+    const b = parsed.data;
+    const [user] = await sql`select id, name, phone from users where phone = ${b.phone}`;
+    // Same answer for an unknown number and a wrong PIN.
+    if (!user) {
+      await checkPin(sql, "00000000-0000-0000-0000-000000000000", b.pin);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+    const check = await checkPin(sql, user.id, b.pin);
+    if (!check.ok) return pinFailure(reply, check, "invalid_credentials");
+    const device = await newDevice(user.id, b.platform, b.device_name);
+    return { ...device, user: { id: user.id, name: user.name, phone: user.phone } };
+  });
+
+  // The app's lock screen falls back to this when Face ID / fingerprint isn't used.
+  app.post("/v1/auth/verify-pin", { ...authed, ...authLimit, onRequest: authenticate }, async (req, reply) => {
+    const parsed = PinBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    const check = await checkPin(sql, req.device.userId, parsed.data.pin);
+    return check.ok ? { ok: true } : pinFailure(reply, check);
+  });
+
+  app.post("/v1/auth/pin", { ...authed, ...authLimit, onRequest: authenticate }, async (req, reply) => {
+    const parsed = ChangePinBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    if (isWeakPin(parsed.data.new_pin)) return reply.code(400).send({ error: "weak_pin" });
+    const check = await checkPin(sql, req.device.userId, parsed.data.current_pin);
+    if (!check.ok) return pinFailure(reply, check);
+    await sql`update users set pin_hash = ${await hashPin(parsed.data.new_pin)} where id = ${req.device.userId}`;
+    return reply.code(204).send();
+  });
+
+  app.post("/v1/auth/logout", authed, async (req, reply) => {
+    await sql`update devices set revoked_at = now() where id = ${req.device.id}`;
+    return reply.code(204).send();
+  });
+
   app.get("/v1/me", authed, async (req) => {
     const [row] = await sql`
-      select u.id, u.name, u.time_zone, d.id as device_id, d.name as device_name, d.platform
+      select u.id, u.name, u.phone, u.time_zone, d.id as device_id, d.name as device_name, d.platform
       from devices d join users u on u.id = d.user_id where d.id = ${req.device.id}`;
     return {
-      user: { id: row!.id, name: row!.name, time_zone: row!.time_zone },
+      user: { id: row!.id, name: row!.name, phone: row!.phone, time_zone: row!.time_zone },
       device: { id: row!.device_id, name: row!.device_name, platform: row!.platform },
     };
   });

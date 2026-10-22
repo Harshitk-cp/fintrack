@@ -1,20 +1,32 @@
 import { router } from "expo-router";
 import type { ReactNode } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { formatInr, type Transaction } from "@/lib/api";
 import { CATEGORIES, category } from "@/lib/categories";
 import { formatTime, kindLabel, payeeName } from "@/lib/format";
-import { useTheme, type Theme } from "@/lib/theme";
+import { alpha, FONT, PALETTE, RADIUS, useTheme, type Theme } from "@/lib/theme";
+import { CyberButton, PixelLabel, PressScale } from "./cyber";
+import { PixelIcon, type PixelIconName } from "./pixel-icon";
+import { Text } from "./text";
 
 export function Section({ title, children, footer }: { title?: string; children: ReactNode; footer?: string }) {
   const t = useTheme();
   return (
     <View style={styles.section}>
-      {title && <Text style={[styles.sectionTitle, { color: t.muted }]}>{title}</Text>}
-      <View style={[styles.card, { backgroundColor: t.card, borderColor: t.border }]}>{children}</View>
+      {title && <PixelLabel>{title}</PixelLabel>}
+      <Card>{children}</Card>
       {footer && <Text style={[styles.footer, { color: t.muted }]}>{footer}</Text>}
     </View>
   );
+}
+
+export type CardTone = "paper" | "ink" | "accent" | "vista";
+
+/** A rounded bento card. `ink` is Oxford with Amande text, `accent` Orange, `vista` Vista Bleu. */
+export function Card({ children, style, tone = "paper" }: { children: ReactNode; style?: StyleProp<ViewStyle>; tone?: CardTone }) {
+  const t = useTheme();
+  const bg = tone === "ink" ? t.ink : tone === "accent" ? t.accent : tone === "vista" ? t.vista : t.card;
+  return <View style={[styles.card, { backgroundColor: bg }, tone === "paper" && { borderWidth: StyleSheet.hairlineWidth, borderColor: t.border }, style]}>{children}</View>;
 }
 
 export function Row({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
@@ -22,28 +34,28 @@ export function Row({ label, value, warn }: { label: string; value: string; warn
   return (
     <View style={styles.row}>
       <Text style={{ color: t.muted, fontSize: 15 }}>{label}</Text>
-      <Text style={{ color: warn ? t.danger : t.text, fontSize: 15, flexShrink: 1, textAlign: "right" }} numberOfLines={2} selectable>
+      <Text style={{ color: t.text, fontSize: 15, flexShrink: 1, textAlign: "right", fontWeight: warn ? "700" : "400" }} numberOfLines={2} selectable>
         {value}
       </Text>
     </View>
   );
 }
 
-export function Chip({ label, selected, onPress, disabled }: { label: string; selected?: boolean; onPress: () => void; disabled?: boolean }) {
+/** Pill chip; selected is an Oxford pill with Amande text. */
+export function Chip({ label, selected, onPress, disabled, icon }: { label: string; selected?: boolean; onPress: () => void; disabled?: boolean; icon?: PixelIconName }) {
   const t = useTheme();
+  const color = selected ? t.onInk : t.text;
   return (
-    <Pressable
+    <PressScale
       onPress={onPress}
       disabled={disabled}
-      accessibilityRole="button"
-      accessibilityState={{ selected: !!selected, disabled: !!disabled }}
-      style={({ pressed }) => [
-        styles.chip,
-        { borderColor: selected ? t.accent : t.border, backgroundColor: selected ? t.accent : t.card, opacity: disabled ? 0.5 : pressed ? 0.7 : 1 },
-      ]}
+      scale={0.94}
+      accessibilityLabel={label}
+      style={[styles.chip, { borderColor: selected ? t.ink : t.border, backgroundColor: selected ? t.ink : t.card, opacity: disabled ? 0.5 : 1 }]}
     >
-      <Text style={{ color: selected ? "#fff" : t.text, fontSize: 14, fontWeight: selected ? "600" : "400" }}>{label}</Text>
-    </Pressable>
+      {icon && <PixelIcon name={icon} size={16} color={selected ? t.accent : t.muted} />}
+      <Text style={{ color, fontSize: 14, fontWeight: selected ? "600" : "400" }}>{label}</Text>
+    </PressScale>
   );
 }
 
@@ -51,7 +63,7 @@ export function CategoryPicker({ value, onChange, disabled }: { value: string | 
   return (
     <View style={styles.chips}>
       {CATEGORIES.map((c) => (
-        <Chip key={c.id} label={`${c.emoji} ${c.name}`} selected={value === c.id} onPress={() => onChange(c.id)} disabled={disabled} />
+        <Chip key={c.id} icon={c.icon} label={c.name} selected={value === c.id} onPress={() => onChange(c.id)} disabled={disabled} />
       ))}
     </View>
   );
@@ -60,40 +72,36 @@ export function CategoryPicker({ value, onChange, disabled }: { value: string | 
 export function Button({
   title, onPress, kind = "primary", busy, disabled, style,
 }: { title: string; onPress: () => void; kind?: "primary" | "secondary" | "danger"; busy?: boolean; disabled?: boolean; style?: StyleProp<ViewStyle> }) {
+  return <CyberButton title={title} onPress={onPress} kind={kind === "primary" ? "solid" : "primary"} busy={busy} disabled={disabled} style={style} />;
+}
+
+/** A round icon button for headers. */
+export function HeaderButton({ label, icon, onPress, badge }: { label: string; icon: PixelIconName; onPress: () => void; badge?: number }) {
   const t = useTheme();
-  const primary = kind === "primary";
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled || busy}
-      accessibilityRole="button"
-      style={({ pressed }) => [
-        styles.button,
-        primary ? { backgroundColor: t.accent } : { borderWidth: 1, borderColor: t.border, backgroundColor: t.card },
-        { opacity: disabled ? 0.5 : pressed ? 0.75 : 1 },
-        style,
-      ]}
-    >
-      {busy ? (
-        <ActivityIndicator color={primary ? "#fff" : t.muted} />
-      ) : (
-        <Text style={{ color: primary ? "#fff" : kind === "danger" ? t.danger : t.accent, fontSize: 16, fontWeight: "600" }}>{title}</Text>
-      )}
-    </Pressable>
+    <PressScale onPress={onPress} scale={0.9} accessibilityLabel={badge ? `${label}, ${badge} new` : label} style={[styles.headerButton, { borderColor: t.border, backgroundColor: t.card }]}>
+      <PixelIcon name={icon} size={22} color={t.text} />
+      {!!badge && <Badge count={badge} style={styles.headerBadge} />}
+    </PressScale>
   );
 }
 
-export function HeaderButton({ label, onPress, badge }: { label: string; onPress: () => void; badge?: number }) {
+export function Badge({ count, style }: { count: number; style?: StyleProp<ViewStyle> }) {
   const t = useTheme();
   return (
-    <Pressable onPress={onPress} hitSlop={10} accessibilityRole="button" accessibilityLabel={badge ? `${label}, ${badge} new` : label} style={styles.headerButton}>
-      <Text style={{ color: t.accent, fontSize: 16, fontWeight: "600" }}>{label}</Text>
-      {!!badge && (
-        <View style={[styles.badge, { backgroundColor: t.danger }]}>
-          <Text style={styles.badgeText}>{badge > 99 ? "99+" : badge}</Text>
-        </View>
-      )}
-    </Pressable>
+    <View style={[styles.badge, { backgroundColor: t.accent }, style]}>
+      <Text style={[styles.badgeText, { color: t.onAccent }]}>{count > 99 ? "99+" : count}</Text>
+    </View>
+  );
+}
+
+/** A rounded tile holding a pixel icon; Orange when it needs attention. */
+export function IconTile({ name, hot, size = 40 }: { name: PixelIconName; hot?: boolean; size?: number }) {
+  const t = useTheme();
+  return (
+    <View style={[styles.tile, { width: size, height: size, backgroundColor: hot ? t.accent : alpha(PALETTE.oxford, 0.06) }]}>
+      <PixelIcon name={name} size={Math.round(size * 0.5)} color={t.text} />
+    </View>
   );
 }
 
@@ -109,41 +117,38 @@ export function TxnRow({ txn, first, last }: { txn: Transaction; first: boolean;
       onPress={() => router.push(`/transaction/${txn.id}`)}
       style={({ pressed }) => [
         styles.txn,
-        { backgroundColor: pressed ? t.border : t.card, borderColor: t.border },
+        { backgroundColor: pressed ? t.cardStrong : t.card, borderColor: t.border },
         first && styles.txnFirst,
         last && styles.txnLast,
         !last && { borderBottomWidth: StyleSheet.hairlineWidth },
       ]}
     >
-      <Text style={styles.txnIcon}>{cat?.emoji ?? (needsReview ? "❓" : credit ? "💰" : "💳")}</Text>
+      <IconTile name={cat?.icon ?? (needsReview ? "warning-diamond" : credit ? "coins" : "credit-card")} hot={needsReview} />
       <View style={styles.txnMain}>
         <Text style={[styles.payee, { color: txn.excluded ? t.muted : t.text }]} numberOfLines={1}>
           {payeeName(txn)}
         </Text>
-        <Text style={[styles.meta, { color: needsReview ? t.danger : t.muted }]} numberOfLines={1}>
+        <Text style={[styles.meta, { color: t.muted }]} numberOfLines={1}>
           {needsReview ? `Needs review · ${meta}` : meta}
         </Text>
       </View>
-      <Text
-        style={[
-          styles.amount,
-          { color: txn.excluded ? t.muted : credit ? t.credit : t.text },
-          txn.excluded && { textDecorationLine: "line-through" },
-        ]}
-      >
-        {credit ? "+" : ""}
-        {formatInr(txn.amount_minor)}
-      </Text>
+      <View style={[styles.amountWrap, credit && !txn.excluded && { backgroundColor: t.vista }]}>
+        <Text style={[styles.amount, { color: txn.excluded ? t.muted : t.text }, txn.excluded && { textDecorationLine: "line-through" }]}>
+          {credit ? "+" : ""}
+          {formatInr(txn.amount_minor)}
+        </Text>
+      </View>
     </Pressable>
   );
 }
 
-export function Empty({ title, body }: { title: string; body?: string }) {
+export function Empty({ title, body, icon = "check" }: { title: string; body?: string; icon?: PixelIconName }) {
   const t = useTheme();
   return (
     <View style={styles.empty}>
-      <Text style={{ color: t.text, fontSize: 17, fontWeight: "600", textAlign: "center" }}>{title}</Text>
-      {body && <Text style={{ color: t.muted, fontSize: 15, lineHeight: 21, textAlign: "center", marginTop: 6 }}>{body}</Text>}
+      <IconTile name={icon} size={56} />
+      <Text style={{ color: t.text, fontFamily: FONT.pixel, fontSize: 14, letterSpacing: 1, textAlign: "center", marginTop: 16 }}>{title.toUpperCase()}</Text>
+      {body && <Text style={{ color: t.muted, fontSize: 15, lineHeight: 21, textAlign: "center", marginTop: 8 }}>{body}</Text>}
     </View>
   );
 }
@@ -152,24 +157,24 @@ export const inputStyle = (t: Theme) => [styles.input, { color: t.text, borderCo
 
 export const styles = StyleSheet.create({
   section: { marginBottom: 24 },
-  sectionTitle: { fontSize: 13, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8, marginLeft: 4 },
-  footer: { fontSize: 13, lineHeight: 18, marginTop: 6, marginHorizontal: 4 },
-  card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 16, gap: 12 },
+  footer: { fontSize: 13, lineHeight: 18, marginTop: 8, marginHorizontal: 6 },
+  card: { borderRadius: RADIUS.card, padding: 18, gap: 12 },
   row: { flexDirection: "row", justifyContent: "space-between", gap: 16 },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: { borderWidth: 1, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 7 },
-  button: { borderRadius: 10, paddingVertical: 14, alignItems: "center", justifyContent: "center", minHeight: 48 },
-  headerButton: { flexDirection: "row", alignItems: "center", paddingHorizontal: 4 },
-  badge: { minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 5, marginLeft: 4, alignItems: "center", justifyContent: "center" },
-  badgeText: { color: "#fff", fontSize: 11, fontWeight: "700" },
-  txn: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, marginHorizontal: 16, borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth },
-  txnFirst: { borderTopLeftRadius: 12, borderTopRightRadius: 12, borderTopWidth: StyleSheet.hairlineWidth },
-  txnLast: { borderBottomLeftRadius: 12, borderBottomRightRadius: 12, borderBottomWidth: StyleSheet.hairlineWidth },
-  txnIcon: { fontSize: 22, width: 34 },
-  txnMain: { flex: 1, marginRight: 12 },
-  payee: { fontSize: 16, fontWeight: "500" },
+  chip: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderRadius: RADIUS.pill, paddingHorizontal: 13, paddingVertical: 8 },
+  headerButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: "center", justifyContent: "center" },
+  headerBadge: { position: "absolute", top: -4, right: -4 },
+  badge: { minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 5, alignItems: "center", justifyContent: "center" },
+  badgeText: { fontFamily: FONT.pixel, fontSize: 9 },
+  tile: { borderRadius: RADIUS.tile, alignItems: "center", justifyContent: "center" },
+  txn: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 12, marginHorizontal: 16, borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth },
+  txnFirst: { borderTopLeftRadius: RADIUS.card, borderTopRightRadius: RADIUS.card, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 16 },
+  txnLast: { borderBottomLeftRadius: RADIUS.card, borderBottomRightRadius: RADIUS.card, borderBottomWidth: StyleSheet.hairlineWidth, paddingBottom: 16 },
+  txnMain: { flex: 1 },
+  payee: { fontSize: 16, fontWeight: "600" },
   meta: { fontSize: 13, marginTop: 3 },
-  amount: { fontSize: 16, fontWeight: "600", fontVariant: ["tabular-nums"] },
-  empty: { paddingHorizontal: 32, paddingVertical: 48 },
-  input: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16 },
+  amountWrap: { borderRadius: RADIUS.pill, paddingHorizontal: 8, paddingVertical: 3 },
+  amount: { fontSize: 16, fontWeight: "700", fontVariant: ["tabular-nums"] },
+  empty: { paddingHorizontal: 32, paddingVertical: 48, alignItems: "center" },
+  input: { borderWidth: 1, borderRadius: RADIUS.field, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16 },
 });

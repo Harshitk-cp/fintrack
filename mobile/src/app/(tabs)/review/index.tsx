@@ -1,13 +1,14 @@
 import { router } from "expo-router";
 import { useCallback, useState } from "react";
-import { FlatList, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from "react-native";
+import { FlatList, Pressable, RefreshControl, StyleSheet, View } from "react-native";
+import { Text, TextInput } from "@/components/text";
 import { Chip, Empty, inputStyle } from "@/components/ui";
 import { formatInr, getTransactions, updateTransaction, type Transaction, type TransactionPatch } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
 import { CATEGORIES } from "@/lib/categories";
 import { formatDateTime, payeeName, REVIEW_PROMPT } from "@/lib/format";
 import { useSession } from "@/lib/session";
-import { useTheme } from "@/lib/theme";
+import { TAB_BAR_SPACE, useTheme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
 
 // The categories most UPI payments to people and small shops fall into.
@@ -50,7 +51,7 @@ export default function ReviewScreen() {
         contentInsetAdjustmentBehavior="automatic"
         data={items ?? []}
         keyExtractor={(x) => x.id}
-        contentContainerStyle={{ padding: 16, paddingBottom: 48, gap: 16 }}
+        contentContainerStyle={{ padding: 16, paddingBottom: TAB_BAR_SPACE + 16, gap: 16 }}
         keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
@@ -106,7 +107,7 @@ function ReviewCard({ txn, onAnswer }: { txn: Transaction; onAnswer: (t: Transac
         </Text>
       </Pressable>
 
-      <Text style={{ color: t.accent, fontSize: 15, fontWeight: "600" }}>{REVIEW_PROMPT[txn.review_reason ?? ""] ?? "Anything to add?"}</Text>
+      <Text style={{ color: t.link, fontSize: 15, fontWeight: "600" }}>{REVIEW_PROMPT[txn.review_reason ?? ""] ?? "Anything to add?"}</Text>
 
       {askName && (
         <TextInput
@@ -126,7 +127,8 @@ function ReviewCard({ txn, onAnswer }: { txn: Transaction; onAnswer: (t: Transac
           return (
             <Chip
               key={id}
-              label={`${c.emoji} ${c.name}`}
+              icon={c.icon}
+              label={c.name}
               onPress={() => onAnswer(txn, { category: id, label, remember: true }, `Saved as ${c.name}.`)}
             />
           );
@@ -136,7 +138,7 @@ function ReviewCard({ txn, onAnswer }: { txn: Transaction; onAnswer: (t: Transac
 
       <View style={[styles.actions, { borderTopColor: t.border }]}>
         <Text
-          style={[styles.action, { color: t.accent }]}
+          style={[styles.action, { color: t.link }]}
           onPress={() => onAnswer(txn, { event_type: "transfer", label, remember: true }, "Marked as a transfer between your own accounts.")}
         >
           My own account
@@ -150,11 +152,11 @@ function ReviewCard({ txn, onAnswer }: { txn: Transaction; onAnswer: (t: Transac
 }
 
 const styles = StyleSheet.create({
-  card: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, padding: 16, gap: 12 },
+  card: { borderRadius: 4, borderWidth: StyleSheet.hairlineWidth, padding: 16, gap: 12 },
   top: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   actions: { flexDirection: "row", justifyContent: "space-between", borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 12 },
   action: { fontSize: 15, fontWeight: "600", paddingVertical: 2 },
   // Above the floating tab bar.
-  toast: { position: "absolute", left: 16, right: 16, bottom: 110, borderRadius: 12, padding: 14 },
+  toast: { position: "absolute", left: 16, right: 16, bottom: TAB_BAR_SPACE + 8, borderRadius: 14, padding: 14 },
 });

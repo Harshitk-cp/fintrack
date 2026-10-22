@@ -1,7 +1,9 @@
 import { router } from "expo-router";
 import { useCallback, useState } from "react";
-import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
-import { Empty } from "@/components/ui";
+import { FlatList, Pressable, RefreshControl, StyleSheet, View } from "react-native";
+import { Text } from "@/components/text";
+import { type PixelIconName } from "@/components/pixel-icon";
+import { Empty, IconTile } from "@/components/ui";
 import { getNotifications, markNotificationsRead, type AppNotification } from "@/lib/api";
 import { useBadges } from "@/lib/badges";
 import { formatDateTime } from "@/lib/format";
@@ -9,7 +11,7 @@ import { useSession } from "@/lib/session";
 import { useTheme } from "@/lib/theme";
 import { useRefreshOnActive } from "@/lib/useRefreshOnActive";
 
-const ICON: Record<AppNotification["kind"], string> = { transaction: "💸", review: "❓", digest: "📊", budget: "⚠️" };
+const ICON: Record<AppNotification["kind"], PixelIconName> = { transaction: "coins", review: "warning-diamond", digest: "chart-line", budget: "wallet" };
 
 export default function InboxScreen() {
   const t = useTheme();
@@ -55,7 +57,7 @@ export default function InboxScreen() {
           onPress={() => item.transaction_id && router.push(`/transaction/${item.transaction_id}`)}
           style={({ pressed }) => [styles.item, { backgroundColor: pressed ? t.border : item.read_at ? "transparent" : t.card }]}
         >
-          <Text style={styles.icon}>{ICON[item.kind]}</Text>
+          <IconTile name={ICON[item.kind]} hot={!item.read_at && (item.kind === "review" || item.kind === "budget")} />
           <View style={{ flex: 1 }}>
             <Text style={{ color: t.text, fontSize: 15, fontWeight: item.read_at ? "500" : "700" }}>{item.title}</Text>
             <Text style={{ color: t.muted, fontSize: 14, lineHeight: 19, marginTop: 2 }}>{item.body}</Text>
@@ -69,5 +71,4 @@ export default function InboxScreen() {
 
 const styles = StyleSheet.create({
   item: { flexDirection: "row", paddingHorizontal: 16, paddingVertical: 14, gap: 12 },
-  icon: { fontSize: 22, width: 32, textAlign: "center" },
 });

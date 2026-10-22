@@ -22,7 +22,8 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      "expo-secure-store",
+      ["expo-local-authentication", { "faceIDPermission": "Fintrack uses Face ID to unlock the app." }]
     ],
     "scheme": "fintrack",
     "experiments": {
