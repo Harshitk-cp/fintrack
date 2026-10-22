@@ -139,6 +139,39 @@ export function login(serverUrl: string, body: { phone: string; pin: string } & 
   return request<AuthResult>(serverUrl, "/v1/auth/login", { method: "POST", body: JSON.stringify(body) });
 }
 
+export interface Mailbox {
+  id: string;
+  address: string;
+  host: string;
+  status: "pending" | "ok" | "auth_failed" | "error";
+  last_error: string | null;
+  last_checked_at: string | null;
+  emails_found: number;
+}
+
+export interface MailState {
+  available: boolean;
+  max: number;
+  mailboxes: Mailbox[];
+}
+
+export function getMail(s: Session) {
+  return authed<MailState>(s, "/v1/mail");
+}
+
+/** Adds a mailbox, or updates the password of one already connected with this address. */
+export function connectMail(s: Session, body: { address: string; app_password: string; host?: string }) {
+  return authed<MailState>(s, "/v1/mail", "PUT", body);
+}
+
+export function syncMail(s: Session, id?: string) {
+  return authed<{ ok: true }>(s, `/v1/mail/sync${id ? `?id=${id}` : ""}`, "POST", {});
+}
+
+export function disconnectMail(s: Session, id: string) {
+  return authed<void>(s, `/v1/mail/${id}`, "DELETE");
+}
+
 export function verifyPin(s: Session, pin: string) {
   return authed<{ ok: true }>(s, "/v1/auth/verify-pin", "POST", { pin });
 }

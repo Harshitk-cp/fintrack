@@ -192,13 +192,15 @@ export default function TransactionScreen() {
         <Section title="Details">
           <Row label="Bank" value={txn.institution_name ?? "Unknown"} />
           {txn.counterparty_vpa && <Row label="UPI ID" value={txn.counterparty_vpa} />}
-          {txn.counterparty && txn.label && <Row label="From SMS" value={txn.counterparty} />}
+          {txn.counterparty && txn.label && <Row label="From the bank" value={txn.counterparty} />}
           {txn.reference && <Row label="Reference" value={txn.reference} />}
           <Row
             label="Source"
-            value={manual ? "Added by you" : `${txn.evidence_count} SMS${txn.evidence.some((e) => e.parser?.startsWith("llm/")) ? " · read by AI" : ""}`}
+            value={manual ? "Added by you" : `${describeSources(txn.evidence)}${txn.evidence.some((e) => e.parser?.startsWith("llm/")) ? " · read by AI" : ""}`}
           />
-          {txn.evidence[0]?.sender && <Row label="Sender" value={txn.evidence[0].sender} />}
+          {[...new Set(txn.evidence.map((e) => e.sender).filter((x): x is string => !!x))].map((sender) => (
+            <Row key={sender} label="Sender" value={sender} />
+          ))}
         </Section>
 
         <Button title="Save" onPress={save} busy={saving} />
@@ -217,3 +219,12 @@ const styles = StyleSheet.create({
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   switchRow: { flexDirection: "row", alignItems: "center", gap: 12 },
 });
+
+/** "SMS", "Email", "SMS + email" or "2 SMS + email": which messages back this transaction. */
+function describeSources(evidence: { source_type: string }[]) {
+  const sms = evidence.filter((e) => e.source_type === "sms").length;
+  const email = evidence.filter((e) => e.source_type === "email").length;
+  const parts = [sms ? `${sms > 1 ? `${sms} ` : ""}SMS` : null, email ? `${email > 1 ? `${email} emails` : "email"}` : null].filter(Boolean) as string[];
+  const text = parts.join(" + ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}

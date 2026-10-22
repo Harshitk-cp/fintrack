@@ -125,17 +125,19 @@ const IGNORE: { re: RegExp; reason: string }[] = [
 const AMOUNT = /(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/gi;
 const BALANCE = /(?:avl\.?\s*bal(?:ance)?|avlbal|available\s+bal(?:ance)?|total\s+bal|\bbal)[\s:.-]*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
 const LAST4 = /(?:a\/c|acct|account|card)(?:\s+(?:no\.?|number|ending(?:\s+with)?))?[\s:.]*[x*#]*\s*\d*?(\d{4})\b/i;
-const REF = /\b(?:ref(?:erence)?|rrn|upi|txn|transaction)\b(?:\s*(?:ref|no|id|number)\.?)*[\s:.#/-]*([0-9]{6,})/i;
+// Also the email phrasing "UPI transaction reference number is 629512340101".
+const REF = /\b(?:ref(?:erence)?|rrn|upi|txn|transaction)\b(?:\s*(?:ref(?:erence)?|no|id|number)\.?)*(?:\s+is)?[\s:.#/-]*([0-9]{6,})/i;
 // NEFT/RTGS UTRs are alphanumeric, e.g. "UTR IN12628259448363".
 const UTR = /\butr\b(?:\s*(?:no|number)\.?)?[\s:.#/-]*([a-z0-9]{10,22})\b/i;
 // A VPA handle has no dot-separated TLD, which is how it differs from an email address.
 const VPA = /[a-z0-9][a-z0-9.\-_]+@[a-z][a-z0-9]+(?!\.?[a-z])/i;
 
-const DEBIT_WORD = /\b(sent|spent|debited|dr\.?|withdrawn|paid|purchase|money sent)\b/i;
+// "for using your … card for Rs" (HDFC card emails) and "has been used for INR" (ICICI) are spends too.
+const DEBIT_WORD = /\b(sent|spent|debited|dr\.?|withdrawn|paid|purchase|money sent|for using your|used for)\b/i;
 const CREDIT_WORD = /\b(credited|received|cr\.?|deposited|refund(?:ed)?|reversed|credit alert)\b/i;
 
 const CP_END = String.raw`(?:\s+on\b|\s*\n|\.\s|\.$|\s+ref\b|\s*\(|\s+avl|\s+info\b|\s+via\b|\s+(?:credited|debited)\b|$)`;
-const COUNTERPARTY_DEBIT = new RegExp(String.raw`\b(?:to|at)\s+(?:vpa\s+)?(.+?)` + CP_END, "gi");
+const COUNTERPARTY_DEBIT = new RegExp(String.raw`\b(?:to|at|towards)\s+(?:vpa\s+)?(.+?)` + CP_END, "gi");
 const COUNTERPARTY_CREDIT = new RegExp(String.raw`\b(?:from|by)\s+(?:vpa\s+)?(.+?)` + CP_END, "gi");
 // Bank names/accounts, and bare phone numbers (helplines like "SMS BLOCK 789 to 9215676766").
 const NOT_COUNTERPARTY = /\b(a\/c|acct|account|card|bank|your)\b|^x+\d+|^\+?\d[\d\s-]{6,}$/i;
@@ -248,7 +250,10 @@ function detectAccountKind(bank: DetectedBank, text: string): AccountKind {
 function findCounterparty(text: string, direction: Direction): string | null {
   const re = direction === "credit" ? COUNTERPARTY_CREDIT : COUNTERPARTY_DEBIT;
   for (const m of text.matchAll(re)) {
-    const c = m[1]!.trim().replace(/\.+$/, "").trim();
+    let c = m[1]!.trim().replace(/\.+$/, "").trim();
+    // "to VPA swiggy@icici SWIGGY": the UPI ID is kept separately, so the payee is the name after it.
+    const named = /^\S+@\S+\s+(.+)$/.exec(c);
+    if (named) c = named[1]!.trim();
     if (c && c.length <= 80 && !NOT_COUNTERPARTY.test(c)) return c;
   }
   return null;

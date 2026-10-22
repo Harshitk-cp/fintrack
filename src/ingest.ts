@@ -18,6 +18,17 @@ export interface SmsInput {
   sourceId: string | null;
 }
 
+export type SourceType = "sms" | "email";
+
+export interface EmailInput {
+  userId: string;
+  from: string;
+  /** Subject plus the alert part of the body (see mail/filter.ts alertText). */
+  text: string;
+  receivedAt: Date;
+  messageId: string | null;
+}
+
 export type EvidenceStatus = "linked" | "ignored" | "unrecognized" | "ambiguous";
 
 export interface IngestOutcome {
@@ -33,9 +44,28 @@ export interface IngestOutcome {
  * Idempotent: resending the same text returns the original outcome.
  * Unrecognized messages are left for processUnrecognized (LLM fallback).
  */
-export async function ingestSms(sql: Sql, sealer: Sealer, timeZone: string, input: SmsInput): Promise<IngestOutcome> {
+export function ingestSms(sql: Sql, sealer: Sealer, timeZone: string, input: SmsInput): Promise<IngestOutcome> {
+  return ingest(sql, sealer, timeZone, "sms", input);
+}
+
+/**
+ * Stores a bank alert email as evidence. Emails go through the same parser and
+ * LLM fallback as SMS; the Message-ID makes re-reading the same mail a no-op.
+ */
+export function ingestEmail(sql: Sql, sealer: Sealer, timeZone: string, input: EmailInput): Promise<IngestOutcome> {
+  return ingest(sql, sealer, timeZone, "email", {
+    userId: input.userId,
+    deviceId: null,
+    sender: input.from,
+    body: input.text,
+    receivedAt: input.receivedAt,
+    sourceId: input.messageId,
+  });
+}
+
+async function ingest(sql: Sql, sealer: Sealer, timeZone: string, sourceType: SourceType, input: SmsInput): Promise<IngestOutcome> {
   const normalized = input.body.trim().replace(/\s+/g, " ");
-  const hash = sha256(normalized);
+  const hash = sha256(sourceType === "email" && input.sourceId ? `email:${input.sourceId}` : normalized);
   const parsed = parseSms(input.sender, input.body, input.receivedAt, timeZone);
 
   const raw = parsed.kind === "ignored" ? null : sealer.seal(input.body);
@@ -45,7 +75,7 @@ export async function ingestSms(sql: Sql, sealer: Sealer, timeZone: string, inpu
     const [ev] = await tx`
       insert into evidence (user_id, device_id, source_type, source_id, sender, observed_at,
                             content_hash, raw_content_enc, retention_until, status)
-      values (${input.userId}, ${input.deviceId}, 'sms', ${input.sourceId}, ${input.sender}, ${input.receivedAt},
+      values (${input.userId}, ${input.deviceId}, ${sourceType}, ${input.sourceId}, ${input.sender}, ${input.receivedAt},
               ${hash}, ${raw}, ${raw ? new Date(Date.now() + retainMs) : null}, 'new')
       on conflict (user_id, content_hash) do nothing
       returning id`;
@@ -61,13 +91,13 @@ export async function ingestSms(sql: Sql, sealer: Sealer, timeZone: string, inpu
       };
     }
 
-    const r = await applyParseResult(tx, ev.id, input.userId, parsed, input.receivedAt);
+    const r = await applyParseResult(tx, ev.id, input.userId, parsed, input.receivedAt, sourceType);
     return { evidenceId: ev.id, ...r, duplicate: false };
   }) as Promise<IngestOutcome>;
 }
 
 /** Records a parse result on an evidence row and, for transactions, resolves and links it. */
-async function applyParseResult(tx: Tx, evidenceId: string, userId: string, parsed: ParseResult, receivedAt: Date) {
+async function applyParseResult(tx: Tx, evidenceId: string, userId: string, parsed: ParseResult, receivedAt: Date, sourceType: SourceType) {
   if (parsed.kind !== "transaction") {
     await tx`
       update evidence set status = ${parsed.kind}, status_reason = ${parsed.reason}, parser = ${parsed.parser},
@@ -77,7 +107,7 @@ async function applyParseResult(tx: Tx, evidenceId: string, userId: string, pars
   }
 
   const occurredAt = parsed.txn.occurredAt ?? receivedAt;
-  const res = await resolveTransaction(tx, userId, parsed.txn, occurredAt, parsed.parser.startsWith("llm/"));
+  const res = await resolveTransaction(tx, userId, parsed.txn, occurredAt, parsed.parser.startsWith("llm/"), sourceType);
   await tx`
     update evidence set status = ${res.status}, status_reason = ${res.reason}, parser = ${parsed.parser},
       parsed = ${tx.json(parsed.txn as never)}, occurred_at = ${occurredAt}
@@ -94,14 +124,21 @@ interface Resolution {
   status: "linked" | "ambiguous";
   reason: string | null;
   transactionId: string | null;
-  method: "created" | "reference";
+  method: "created" | "reference" | "heuristic";
 }
 
+// How close an SMS and an email for the same payment must be in time.
+const CROSS_SOURCE_WINDOW_MS = 15 * 60_000;
+const CROSS_SOURCE_WINDOW_NO_TIME_MS = 36 * 3_600_000; // the message only gave a date
+
 /**
- * Matches on the bank/UPI reference only. Same-amount messages without a
- * shared reference are never merged: two identical purchases are legitimate.
+ * Matches on the bank/UPI reference first. Without one, an email may join a
+ * transaction that so far only has an SMS (and vice versa) when bank, amount
+ * and direction agree and the times are close: the same alert sent twice.
+ * Two messages from the same source are never merged that way, because two
+ * identical purchases are legitimate and each sends its own SMS.
  */
-async function resolveTransaction(tx: Tx, userId: string, t: ParsedTxn, occurredAt: Date, fromLlm: boolean): Promise<Resolution> {
+async function resolveTransaction(tx: Tx, userId: string, t: ParsedTxn, occurredAt: Date, fromLlm: boolean, sourceType: SourceType): Promise<Resolution> {
   if (t.reference) {
     const [existing] = await tx`
       select id, amount_minor from transactions
@@ -111,8 +148,26 @@ async function resolveTransaction(tx: Tx, userId: string, t: ParsedTxn, occurred
       if (Number(existing.amount_minor) !== t.amountMinor) {
         return { status: "ambiguous", reason: "reference_amount_mismatch", transactionId: null, method: "reference" };
       }
+      await enrich(tx, userId, existing.id, t);
       return { status: "linked", reason: null, transactionId: existing.id, method: "reference" };
     }
+  }
+
+  const window = t.timeKnown ? CROSS_SOURCE_WINDOW_MS : CROSS_SOURCE_WINDOW_NO_TIME_MS;
+  const [twin] = await tx`
+    select t.id from transactions t
+    where t.user_id = ${userId} and t.source <> 'manual'
+      and t.amount_minor = ${t.amountMinor} and t.direction = ${t.direction} and t.institution = ${t.institution}
+      and t.occurred_at between ${new Date(occurredAt.getTime() - window)} and ${new Date(occurredAt.getTime() + window)}
+      and not exists (
+        select 1 from transaction_evidence te join evidence e on e.id = te.evidence_id
+        where te.transaction_id = t.id and e.source_type = ${sourceType})
+    order by abs(extract(epoch from t.occurred_at - ${occurredAt}::timestamptz))
+    limit 1
+    for update`;
+  if (twin) {
+    await enrich(tx, userId, twin.id, t);
+    return { status: "linked", reason: null, transactionId: twin.id, method: "heuristic" };
   }
 
   const accountId = t.last4 ? await upsertAccount(tx, userId, t) : null;
@@ -121,10 +176,10 @@ async function resolveTransaction(tx: Tx, userId: string, t: ParsedTxn, occurred
   const [created] = await tx`
     insert into transactions (user_id, account_id, institution, institution_name, amount_minor, direction,
                               event_type, channel, occurred_at, counterparty, counterparty_vpa, reference,
-                              category, category_source, label, review_reason)
+                              category, category_source, label, review_reason, source)
     values (${userId}, ${accountId}, ${t.institution}, ${t.institutionName}, ${t.amountMinor}, ${t.direction},
             ${c.eventType}, ${t.channel}, ${occurredAt}, ${t.counterparty}, ${t.vpa}, ${t.reference},
-            ${c.category}, ${c.categorySource}, ${c.label}, ${c.reviewReason})
+            ${c.category}, ${c.categorySource}, ${c.label}, ${c.reviewReason}, ${sourceType})
     on conflict (user_id, reference, direction) where reference is not null do nothing
     returning id`;
   if (created) return { status: "linked", reason: null, transactionId: created.id, method: "created" };
@@ -133,6 +188,25 @@ async function resolveTransaction(tx: Tx, userId: string, t: ParsedTxn, occurred
   const [winner] = await tx`
     select id from transactions where user_id = ${userId} and reference = ${t.reference} and direction = ${t.direction}`;
   return { status: "linked", reason: null, transactionId: winner!.id, method: "reference" };
+}
+
+/**
+ * Fills gaps on a transaction from a second message about it: the reference,
+ * payee, UPI ID and account the first message left out. Never overwrites.
+ */
+async function enrich(tx: Tx, userId: string, transactionId: string, t: ParsedTxn) {
+  const accountId = t.last4 ? await upsertAccount(tx, userId, t) : null;
+  // A reference already used by another transaction is left alone (unique per user and direction).
+  const [{ taken }] = (await tx`
+    select exists (select 1 from transactions where user_id = ${userId} and reference = ${t.reference} and direction = ${t.direction}) as taken`) as unknown as [{ taken: boolean }];
+  await tx`
+    update transactions set
+      reference = coalesce(reference, ${taken ? null : t.reference}),
+      counterparty = coalesce(counterparty, ${t.counterparty}),
+      counterparty_vpa = coalesce(counterparty_vpa, ${t.vpa}),
+      account_id = coalesce(account_id, ${accountId}),
+      updated_at = now()
+    where id = ${transactionId}`;
 }
 
 export async function loadPayeeRules(sql: Sql | Tx, userId: string): Promise<PayeeRule[]> {
@@ -172,7 +246,7 @@ export async function processUnrecognized(
       order by ingested_at
       limit ${batch}
       for update skip locked)
-    returning id, user_id, sender, observed_at, raw_content_enc`;
+    returning id, user_id, sender, observed_at, raw_content_enc, source_type`;
 
   let failed = 0;
   for (const row of claimed) {
@@ -181,7 +255,7 @@ export async function processUnrecognized(
       const extraction = await extractor.extract(row.sender, body);
       const parsed = groundExtraction(extraction, body, row.observed_at, timeZone, extractor.name);
       await sql.begin(async (tx) => {
-        await applyParseResult(tx, row.id, row.user_id, parsed, row.observed_at);
+        await applyParseResult(tx, row.id, row.user_id, parsed, row.observed_at, row.source_type);
         // A usable answer that still isn't a transaction is final; asking again costs a call for the same verdict.
         const attempts = parsed.kind === "unrecognized" ? LLM_MAX_ATTEMPTS : tx`llm_attempts`;
         await tx`update evidence set llm_error = null, llm_attempts = ${attempts} where id = ${row.id}`;

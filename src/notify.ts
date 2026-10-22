@@ -69,6 +69,9 @@ async function insert(sql: Sql, n: NewNotification) {
 const PUSH_MAX_ATTEMPTS = 3;
 const BUDGET_STEPS = [80, 100] as const;
 
+/** Transactions older than this when they first arrive get no alert. */
+const STALE_ALERT_MS = 6 * 3_600_000;
+
 export class Notifier {
   #sql: Sql;
   #push: PushSender | null;
@@ -128,10 +131,12 @@ export class Notifier {
       from users u
       where t.id in (select id from transactions where notified_at is null order by created_at limit 100 for update skip locked)
         and u.id = t.user_id
-      returning t.id, t.user_id, t.source, t.amount_minor, t.direction, t.event_type, t.counterparty, t.counterparty_vpa,
+      returning t.id, t.user_id, t.source, t.occurred_at, t.amount_minor, t.direction, t.event_type, t.counterparty, t.counterparty_vpa,
                 t.label, t.category, t.institution_name, t.review_reason, t.reviewed_at, t.excluded, u.alert_min_minor`;
     for (const t of rows) {
       if (t.source === "manual" || t.excluded) continue;
+      // Catch-up (a mailbox's first sync, an SMS backlog) isn't news: it shows in the app, not as an alert.
+      if (this.#now().getTime() - new Date(t.occurred_at).getTime() > STALE_ALERT_MS) continue;
       const amount = formatInr(Number(t.amount_minor));
       const payee = t.label ?? t.counterparty?.replace(/^\*+/, "") ?? t.counterparty_vpa ?? null;
       const bank = t.institution_name ?? "your bank";

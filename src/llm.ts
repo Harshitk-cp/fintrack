@@ -32,7 +32,7 @@ export interface SmsExtractor {
   extract(sender: string | null, body: string): Promise<Extraction>;
 }
 
-const SYSTEM = `You extract structured data from Indian bank and card SMS alerts.
+const SYSTEM = `You extract structured data from Indian bank and card alerts, sent as SMS or as email (subject line first, then the body).
 
 Decide whether the message reports a completed money movement on the recipient's own account or card (a debit, spend, withdrawal, credit, refund or reversal). OTPs, promotions, payment reminders, statement/due notices, failed or declined transactions, collect requests, future autopay notices and balance-only messages are not completed transactions.
 
@@ -61,7 +61,7 @@ export class ClaudeExtractor implements SmsExtractor {
       max_tokens: 4096,
       output_config: { effort: "low", format: zodOutputFormat(Extraction) },
       system: SYSTEM,
-      messages: [{ role: "user", content: `Sender: ${sender ?? "unknown"}\n\nSMS:\n${body}` }],
+      messages: [{ role: "user", content: `Sender: ${sender ?? "unknown"}\n\nMessage:\n${body}` }],
     });
     if (res.stop_reason === "refusal") throw new Error("model refused");
     if (!res.parsed_output) throw new Error(`no structured output (stop_reason=${res.stop_reason})`);

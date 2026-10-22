@@ -12,6 +12,8 @@ import { classifyBackfill } from "./ledger.ts";
 import { ClaudeExtractor, DEFAULT_LLM_MODEL, groundExtraction } from "./llm.ts";
 import { Notifier, NtfyPush } from "./notify.ts";
 import { parseSms } from "./sms/parser.ts";
+import { MailPoller } from "./mail/poller.ts";
+import { ImapMailSource } from "./mail/source.ts";
 import { LlmWorker } from "./worker.ts";
 
 const USAGE = `fintrack <command>
@@ -72,9 +74,15 @@ async function main(argv: string[]) {
       let worker: LlmWorker | null = null;
       const notifier = new Notifier(sql, cfg.pushUrl ? new NtfyPush(cfg.pushUrl, cfg.pushToken) : null);
       const assistant = cfg.llmModel ? new ClaudeAssistant(sql, cfg.llmModel) : null;
-      const app = await buildApi({ sql, sealer, timeZone: cfg.timeZone, onUnrecognized: () => worker?.kick(), notifier, assistant });
+      const mailSource = new ImapMailSource();
+      const mailPoller = new MailPoller(sql, sealer, cfg.timeZone, mailSource, { onUnrecognized: () => worker?.kick(), onTransaction: () => notifier.kick() });
+      const app = await buildApi({
+        sql, sealer, timeZone: cfg.timeZone, onUnrecognized: () => worker?.kick(), notifier, assistant, mail: { source: mailSource, poller: mailPoller },
+      });
       notifier.setLogger(app.log);
       notifier.start();
+      mailPoller.setLogger(app.log);
+      mailPoller.start();
       if (cfg.llmModel) {
         worker = new LlmWorker(sql, sealer, new ClaudeExtractor(cfg.llmModel), cfg.timeZone, app.log);
         worker.start();

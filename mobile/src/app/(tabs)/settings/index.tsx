@@ -1,6 +1,7 @@
 import * as Clipboard from "expo-clipboard";
 import { useCallback, useEffect, useState } from "react";
 import { Linking, PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, View } from "react-native";
+import { MailSettings } from "@/components/mail-settings";
 import { Text, TextInput } from "@/components/text";
 import SmsCollector, { type CollectorStatus } from "../../../../modules/sms-collector";
 import { Chip, inputStyle, Row as UiRow, Section as UiSection } from "@/components/ui";
@@ -22,6 +23,7 @@ export default function SettingsScreen() {
   return (
     <ScrollView contentContainerStyle={styles.body} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled">
       <AlertSettings />
+      <MailSettings />
 
       <Section title="Account" t={t}>
         <Row label="Signed in as" value={session?.userName ?? ""} t={t} />

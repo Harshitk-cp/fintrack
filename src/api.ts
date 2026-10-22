@@ -9,6 +9,8 @@ import type { Sql } from "./db.ts";
 import { ingestSms } from "./ingest.ts";
 import { createManual, deleteManual, getTransaction, listTransactions, updateTransaction } from "./ledger.ts";
 import { newPushTopic, type Notifier } from "./notify.ts";
+import { imapServerFor } from "./mail/filter.ts";
+import { MailAuthError, MailHostError, type MailSource } from "./mail/source.ts";
 import { looksLikeOtp } from "./sms/parser.ts";
 import { isReceived, isRefund, isSpend } from "./stats.ts";
 
@@ -31,6 +33,7 @@ export interface ApiDeps {
   onUnrecognized?: () => void; // wakes the LLM fallback worker
   notifier?: Notifier | null;
   assistant?: Assistant | null;
+  mail?: { source: MailSource; poller: { kick(accountId: string): void } } | null;
 }
 
 // iOS Shortcuts sends "" for unset fields and may format Sender loosely, so
@@ -108,13 +111,21 @@ const RegisterBody = z.object({ phone: Phone, pin: Pin, name: z.string().trim().
 const LoginBody = z.object({ phone: Phone, pin: Pin, ...DeviceInfo });
 const PinBody = z.object({ pin: Pin });
 const ChangePinBody = z.object({ current_pin: Pin, new_pin: Pin });
+const MailBody = z.object({
+  address: z.email().max(200).transform((s) => s.trim().toLowerCase()),
+  // App passwords are shown with spaces ("abcd efgh ijkl mnop"); IMAP wants them without.
+  app_password: z.string().min(4).max(200).transform((s) => s.replace(/\s+/g, "")),
+  host: z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{3,200}$/).optional(),
+  // IMAP over TLS only; plain-text 143 would send the password unencrypted.
+  port: z.literal(993).optional(),
+});
 
 const SummaryQuery = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() });
 
 const MAX_CLOCK_SKEW_MS = 5 * 60_000;
 const MAX_BACKFILL_MS = 30 * 86_400_000;
 
-export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecognized, notifier = null, assistant = null }: ApiDeps) {
+export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecognized, notifier = null, assistant = null, mail = null }: ApiDeps) {
   const app = Fastify({
     trustProxy: true, // behind Caddy
     bodyLimit: 16 * 1024,
@@ -440,6 +451,67 @@ export async function buildApi({ sql, sealer, timeZone, logger = true, onUnrecog
     await sql`insert into notifications (user_id, kind, title, body) values (${req.device.userId}, 'digest', 'Fintrack test', 'Push notifications are working.')`;
     notifier.kick();
     return { ok: true };
+  });
+
+  // Bank alert emails over IMAP, several mailboxes per user. A password is checked by logging in before it is saved.
+  const MAX_MAILBOXES = 5;
+  async function mailboxes(userId: string) {
+    return sql`
+      select id, address, host, status, last_error, last_checked_at, emails_found
+      from mail_accounts where user_id = ${userId} order by created_at`;
+  }
+
+  app.get("/v1/mail", authed, async (req) => ({ available: !!mail, max: MAX_MAILBOXES, mailboxes: await mailboxes(req.device.userId) }));
+
+  // Each attempt logs in to a mail server, so keep it tight: the API must not double as a password-guessing tool.
+  app.put("/v1/mail", { ...authed, config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (req, reply) => {
+    if (!mail) return reply.code(503).send({ error: "mail_disabled" });
+    const parsed = MailBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
+    const b = parsed.data;
+    const server = b.host ? { host: b.host, port: 993 } : imapServerFor(b.address);
+    if (!server) return reply.code(422).send({ error: "unknown_provider" });
+    try {
+      await mail.source.verify({ ...server, user: b.address, pass: b.app_password });
+    } catch (err) {
+      req.log.info({ err: err instanceof Error ? err.message : String(err), host: server.host }, "mail verify failed");
+      return reply.code(422).send({ error: err instanceof MailAuthError ? "auth_failed" : err instanceof MailHostError ? "bad_host" : "connect_failed" });
+    }
+    // Adding an address that is already connected updates its password; the cursor starts afresh.
+    // The count check and insert share a transaction so two parallel requests can't pass the limit.
+    const acc = await sql.begin(async (tx) => {
+      await tx`select id from users where id = ${req.device.userId} for update`;
+      const [{ n }] = (await tx`
+        select count(*)::int as n from mail_accounts where user_id = ${req.device.userId} and address <> ${b.address}`) as unknown as [{ n: number }];
+      if (n >= MAX_MAILBOXES) return null;
+      const [row] = await tx`
+        insert into mail_accounts (user_id, address, host, port, password_enc)
+        values (${req.device.userId}, ${b.address}, ${server.host}, ${server.port}, ${sealer.seal(b.app_password)})
+        on conflict (user_id, address) do update set host = excluded.host, port = excluded.port, password_enc = excluded.password_enc,
+          uid_validity = null, last_uid = 0, status = 'pending', last_error = null, last_checked_at = null
+        returning id`;
+      return row!;
+    });
+    if (!acc) return reply.code(409).send({ error: "too_many_mailboxes" });
+    mail.poller.kick(acc.id);
+    return { available: true, max: MAX_MAILBOXES, mailboxes: await mailboxes(req.device.userId) };
+  });
+
+  /** Syncs all of the user's mailboxes now, or one with `?id=`. */
+  app.post("/v1/mail/sync", authed, async (req, reply) => {
+    const id = (req.query as { id?: string }).id;
+    if (id && !Id.safeParse({ id }).success) return reply.code(400).send({ error: "invalid_id" });
+    const accs = await sql`select id from mail_accounts where user_id = ${req.device.userId} ${id ? sql`and id = ${id}` : sql``}`;
+    if (!accs.length || !mail) return reply.code(404).send({ error: "not_connected" });
+    for (const a of accs) mail.poller.kick(a.id);
+    return reply.code(202).send({ ok: true });
+  });
+
+  app.delete("/v1/mail/:id", authed, async (req, reply) => {
+    const parsed = Id.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_id" });
+    const r = await sql`delete from mail_accounts where id = ${parsed.data.id} and user_id = ${req.device.userId}`;
+    return r.count ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
   });
 
   app.post("/v1/ask", { ...authed, config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }, async (req, reply) => {

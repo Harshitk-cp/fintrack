@@ -104,7 +104,9 @@ export function CyberButton({ title, onPress, kind = "primary", busy, disabled, 
           <>
             <View style={[styles.buttonRow, solid && { flex: 1, paddingLeft: 16 }]}>
               {icon}
-              <Text style={[styles.buttonText, { color: label }]}>{title.toUpperCase()}</Text>
+              <Text style={[styles.buttonText, { color: label }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+                {title.toUpperCase()}
+              </Text>
             </View>
             {solid && (
               <Animated.View style={[styles.disc, { backgroundColor: t.accent }, disc]}>

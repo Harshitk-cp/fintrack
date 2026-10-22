@@ -45,6 +45,22 @@ The notifier (`src/notify.ts`) runs every 30 seconds and right after each new tr
 
 **Push notifications** go through [ntfy](https://ntfy.sh), because a free Apple account can't send iOS push from our own app. The user turns push on in Settings, which creates a secret topic; they subscribe to it in the ntfy app (iOS or Android), and tapping an alert opens the transaction in Fintrack. ntfy.sh is the default server and sees alert text (amounts and payees). To avoid that, run ntfy on the VPS and set `FINTRACK_PUSH_URL`.
 
+## Bank emails
+
+Banks email most payments as well as texting them. Each person can connect up to five mailboxes in Settings with an **app password** (Gmail: turn on 2-Step Verification, then create one at myaccount.google.com/apppasswords). The server logs in to check it before saving it, keeps it sealed with the data key, and never returns it.
+
+Every 5 minutes (and right after connecting, or on **Sync**) the server reads INBOX over IMAP:
+- read-only (`EXAMINE`): nothing is marked as read, moved or deleted;
+- the first sync looks back 30 days, later ones continue from the last UID seen;
+- only mail from bank domains (a list, plus any `.bank.in` address) with a payment-like subject is read; offers, statements, OTPs and everything else are skipped without a parse or a model call;
+- only mail your provider authenticated is trusted: the topmost `Authentication-Results` header (added by Gmail/Outlook, not the sender) must show DMARC pass, or a DKIM pass signed by the bank's own domain. Forged "bank" emails are skipped;
+- a custom mail server must resolve only to public addresses (no loopback, private, link-local or metadata IPs) and use TLS on port 993; the connection is pinned to the checked address.
+- the alert part of the body (subject first, disclaimers cut off) goes through the same parser and Haiku fallback as SMS.
+
+An SMS and an email about the same payment become **one** transaction: they join on the UPI/bank reference, or, when one of them has none, on same bank + amount + direction within 15 minutes (36 hours if the message has only a date) as long as that transaction doesn't already have a message from the same source. The second message fills in what the first left out (reference, UPI ID, payee, account). Two SMS for identical purchases never merge.
+
+Payments that arrive more than 6 hours after they happened (a first mailbox sync, an SMS backlog) don't trigger alerts; they still appear in the app and the review queue.
+
 ## Assistant
 
 The **Ask** tab sends the conversation to `POST /v1/ask`, which runs Claude (Haiku by default) with two read-only tools: `search_transactions` and `spending_breakdown`. Both are scoped to the asking user, and all totals are computed in SQL, so the model reports figures rather than calculating them. It is off unless `ANTHROPIC_API_KEY` is set.
@@ -172,6 +188,7 @@ All `/v1` routes require `Authorization: Bearer <device token>` and are limited 
 | `GET /v1/summary?month=YYYY-MM` | Month totals, by bank and by category, budget and review count |
 | `GET /v1/notifications`, `POST /v1/notifications/read` | The inbox |
 | `GET/PATCH /v1/settings`, `POST /v1/settings/push/test` | Alert threshold, digest hour, budget, push on/off |
+| `GET /v1/mail`, `PUT /v1/mail`, `DELETE /v1/mail/:id`, `POST /v1/mail/sync[?id=]` | Bank-email mailboxes, up to 5 per user. `PUT { address, app_password, host? }` adds one, or updates the password of that address; it checks the login first (`422 auth_failed`, `connect_failed`, `bad_host`, `unknown_provider`; `409 too_many_mailboxes`) |
 | `POST /v1/ask` | `{ messages: [{ role, content }] }` → `{ answer }`. `503` when no API key is set |
 | `GET /healthz` | Liveness check |
 
@@ -179,5 +196,4 @@ Amounts are integers in paise (`amount_minor`).
 
 ## Next steps
 
-- Move the server to the VPS (HTTPS), then make Release builds of the app
-- Gmail enrichment, subscription detection, monthly report
+- Subscription detection, monthly report
