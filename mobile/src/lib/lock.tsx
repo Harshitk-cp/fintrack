@@ -20,16 +20,13 @@ import { alpha, FONT, MOTION, PALETTE, useTheme } from "./theme";
  */
 export function LockGate({ children }: { children: ReactNode }) {
   const { session, loading } = useSession();
-  const [locked, setLocked] = useState(true);
   const [covered, setCovered] = useState(false);
-
-  // A stored session (app launch) starts locked; signing in just now doesn't ask for the PIN again.
-  const hadSession = useRef<boolean | null>(null);
-  useEffect(() => {
-    if (loading) return;
-    if (hadSession.current === false && session) setLocked(false);
-    hadSession.current = !!session;
-  }, [loading, session]);
+  // The token the lock is guarding: the session found in storage at launch. A session
+  // created by signing in just now has a different token, so it's never locked and the
+  // lock can't flash (or start a fingerprint prompt) right after sign-in.
+  const [lockedToken, setLockedToken] = useState<string | null | undefined>(undefined);
+  if (!loading && lockedToken === undefined) setLockedToken(session?.token ?? null);
+  const locked = !!session && session.token === lockedToken;
 
   useEffect(() => {
     // Background and "inactive" (iOS app switcher, Control Centre) only hide content; they don't lock.
@@ -37,7 +34,7 @@ export function LockGate({ children }: { children: ReactNode }) {
     return () => sub.remove();
   }, []);
 
-  const unlock = useCallback(() => setLocked(false), []);
+  const unlock = useCallback(() => setLockedToken(null), []);
 
   if (!session) return <>{children}</>;
   return (
