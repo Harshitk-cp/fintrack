@@ -57,7 +57,15 @@ jobs:
           KNOWN_HOSTS: "35.170.7.31 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZjU9lN1lpJDjPlC+wwO2Tiy0tDutMN7UKi5c6OlVEg"
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          # The secret is the private key as one base64 line (pasting multi-line keys mangles them).
+          # A raw PEM key still works; stray carriage returns are dropped either way.
+          key=$(printf '%s' "$SSH_KEY" | tr -d '\r')
+          case "$key" in
+            -----BEGIN*) printf '%s\n' "$key" > ~/.ssh/deploy ;;
+            *) printf '%s' "$key" | tr -d ' \n' | base64 -d > ~/.ssh/deploy ;;
+          esac
+          chmod 600 ~/.ssh/deploy
+          ssh-keygen -y -f ~/.ssh/deploy > /dev/null || { echo "DEPLOY_SSH_KEY is not a valid private key" >&2; exit 1; }
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           # The key is pinned to deploy/deploy.sh on the server; no command is sent.
           ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes ubuntu@35.170.7.31
