@@ -186,6 +186,18 @@ describe("notifications", () => {
     expect(digests[0]!.body).toContain("Top: Food & dining ₹3,451");
   });
 
+  it("sends a small-hours digest about the day that just ended", async () => {
+    await ingest(SWIGGY); // 21 Oct
+    await sql`update users set digest_hour = 1`;
+    const night = () => new Date("2026-10-21T20:00:00Z"); // 01:30 IST on 22 Oct
+    await new Notifier(sql, null, null, night).runOnce();
+    await new Notifier(sql, null, null, () => new Date("2026-10-22T10:00:00Z")).runOnce(); // later that day: not again
+    const digests = await sql`select title, body, dedupe_key from notifications where kind = 'digest'`;
+    expect(digests).toHaveLength(1);
+    expect(digests[0]).toMatchObject({ title: "Yesterday: ₹3,451 spent", dedupe_key: "digest:2026-10-21" });
+    expect(digests[0]!.body).toContain("1 payment yesterday. Top: Food & dining ₹3,451");
+  });
+
   it("warns at 80% and 100% of the monthly budget, once each", async () => {
     await sql`update users set monthly_budget_minor = 400000`;
     await ingest(SWIGGY); // 3451 of 4000 = 86%

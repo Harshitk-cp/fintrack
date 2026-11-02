@@ -33,11 +33,16 @@ if [ -f "$APP/embedded.mobileprovision" ]; then
   fi
 fi
 
+# Build for this phone, not "any iPhone": a free team's device list can be emptied by
+# Apple, and only a real destination lets Xcode register the phone again.
+HW_UDID=$(xcrun devicectl list devices --json-output /dev/stdout 2>/dev/null | sed -n '/^{/,$p' \
+  | python3 -c 'import json,sys; d=sys.argv[1]; print(next(x["hardwareProperties"]["udid"] for x in json.load(sys.stdin)["result"]["devices"] if x["identifier"]==d))' "$DEVICE")
+
 log "building Release"
 cd "$IOS"
 NODE_ENV=production APP_VARIANT=production xcodebuild -workspace Fintrack.xcworkspace -scheme Fintrack -configuration Release \
-  -destination 'generic/platform=iOS' -derivedDataPath build-release \
-  -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic \
+  -destination "platform=iOS,id=$HW_UDID" -derivedDataPath build-release \
+  -allowProvisioningUpdates -allowProvisioningDeviceRegistration DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic \
   build > /tmp/fintrack-ios-build.log 2>&1 || { log "build failed, see /tmp/fintrack-ios-build.log"; tail -20 /tmp/fintrack-ios-build.log; exit 1; }
 
 exp=$(expiry_of "$APP/embedded.mobileprovision")

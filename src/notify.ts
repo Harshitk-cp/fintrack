@@ -88,6 +88,15 @@ interface PaceUser {
   monthly_income_minor: string | number;
 }
 
+/** A daily summary set before this hour (e.g. 1 AM) reports the day before. */
+const NIGHT_OWL_HOUR = 6;
+
+/** "2026-11-01" → "2026-10-31". */
+function previousDay(date: string) {
+  const [y, m, d] = date.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+
 /** Transactions older than this when they first arrive get no alert. */
 const STALE_ALERT_MS = 6 * 3_600_000;
 
@@ -204,24 +213,30 @@ export class Notifier {
       if (local.hour >= u.digest_hour) await this.#smsStopped(u.id);
 
       if (local.hour >= u.digest_hour) {
-        const [exists] = await sql`select 1 from notifications where user_id = ${u.id} and dedupe_key = ${`digest:${local.date}`}`;
+        // A summary set for the small hours covers the day that just ended, not the one that just began.
+        const early = u.digest_hour < NIGHT_OWL_HOUR;
+        const day = early ? previousDay(local.date) : local.date;
+        const key = `digest:${day}`;
+        const [exists] = await sql`select 1 from notifications where user_id = ${u.id} and dedupe_key = ${key}`;
         if (exists) continue;
-        const today = await netSpend(sql, u.id, u.time_zone, local.date, local.date);
-        const top = await topCategories(sql, u.id, u.time_zone, local.date, local.date, 2);
+        const label = early ? "yesterday" : "today";
+        const spent = await netSpend(sql, u.id, u.time_zone, day, day);
+        const top = await topCategories(sql, u.id, u.time_zone, day, day, 2);
+        const monthSoFar = early ? await netSpend(sql, u.id, u.time_zone, monthStart(day.slice(0, 7)), day) : month;
         const [{ pending }] = (await sql`
           select count(*)::int as pending from transactions
           where user_id = ${u.id} and review_reason is not null and reviewed_at is null`) as unknown as [{ pending: number }];
         const lines = [
-          today.count
-            ? `${today.count} payment${today.count === 1 ? "" : "s"} today.` +
+          spent.count
+            ? `${spent.count} payment${spent.count === 1 ? "" : "s"} ${label}.` +
               (top.length ? ` Top: ${top.map((c) => `${categoryName(c.category) ?? "Uncategorised"} ${formatInr(c.spentMinor)}`).join(", ")}.` : "")
-            : "No spending recorded today.",
-          `This month: ${formatInr(month.netMinor)}${budget ? ` of ${formatInr(budget)}` : ""}.`,
+            : `No spending recorded ${label}.`,
+          `${early && day.slice(0, 7) !== local.month ? "Last month" : "This month"}: ${formatInr(monthSoFar.netMinor)}${budget ? ` of ${formatInr(budget)}` : ""}.`,
           pending ? `${pending} transaction${pending === 1 ? "" : "s"} waiting for review.` : null,
         ];
         await insert(sql, {
-          userId: u.id, kind: "digest", dedupeKey: `digest:${local.date}`,
-          title: `Today: ${formatInr(today.netMinor)} spent`,
+          userId: u.id, kind: "digest", dedupeKey: key,
+          title: `${early ? "Yesterday" : "Today"}: ${formatInr(spent.netMinor)} spent`,
           body: lines.filter(Boolean).join(" "),
         });
       }

@@ -110,7 +110,7 @@ describe("SIP alerts", () => {
   it("a clear debit creates the SIP and marks the month paid, as savings", async () => {
     const e = await ingestSip();
     await processSipSuggestions(sql, sealer, new FakeReader(reading({})), TZ);
-    const s = (await req("GET", "/v1/sips")).json();
+    const s = (await req("GET", "/v1/sips?month=2026-10")).json(); // the month the email says it was debited
     expect(s.sips).toEqual([expect.objectContaining({ name: "Parag Parikh Flexi Cap Fund", amount_minor: 500_000, source: "detected", paid: expect.objectContaining({ transaction_id: e.transactionId }) })]);
     expect(s.suggestions).toEqual([]);
     expect((await sql`select category from transactions where id = ${e.transactionId}`)[0]!.category).toBe("investments");
